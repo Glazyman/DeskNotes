@@ -40,15 +40,25 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSMenuDelegate, UNUserNotificationCenterDelegate>
-@property (strong) NSStatusItem *statusItem;
+// one desktop overlay per display: its own window, webview, and note store
+// (a window cannot span displays when "Displays have separate Spaces" is on)
+@interface ScreenOverlay : NSObject
 @property (strong) OverlayWindow *window;
 @property (strong) WKWebView *webView;
 @property (strong) NSArray<NSValue *> *hitRects; // note rects in view coords
+@property (copy) NSString *suffix;               // storage-key suffix; '' = primary display
+@end
+@implementation ScreenOverlay
+@end
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSMenuDelegate, UNUserNotificationCenterDelegate>
+@property (strong) NSStatusItem *statusItem;
+@property (strong) NSMutableArray<ScreenOverlay *> *overlays; // one per connected display
+@property (strong) ScreenOverlay *editorOverlay;  // overlay whose note is open in the editor window
+@property (weak) WKWebView *dictWebView;          // webview that started dictation
 @property (assign) BOOL hiddenAll;
 @property (assign) BOOL floatOnTop;
 @property (assign) BOOL tempFloat; // new note floats above apps until the user clicks away
-@property (assign) BOOL editorOpen;
 @property (strong) NSWindow *editorWindow; // real app window for the expanded editor (Stage Manager stages it)
 @property (strong) NSWindow *panelWindow;  // separate Settings/History window (desktop notes stay visible)
 @property (strong) WKWebView *panelWebView;
@@ -99,55 +109,19 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     menu.delegate = self;
     self.statusItem.menu = menu;
 
-    // web view (transparent) hosting the notes
-    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
-    [config.userContentController addScriptMessageHandler:self name:@"hit"];
-    [config.userContentController addScriptMessageHandler:self name:@"dict"];
-    [config.userContentController addScriptMessageHandler:self name:@"notify"];
-    [config.userContentController addScriptMessageHandler:self name:@"backup"];
     [UNUserNotificationCenter currentNotificationCenter].delegate = self;
     self.dictQ = dispatch_queue_create("desknotes.whisper", DISPATCH_QUEUE_SERIAL);
     self.pcm = [NSMutableData data];
-    self.webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:config];
-    self.webView.UIDelegate = self;
-    self.webView.navigationDelegate = self;
-    [self.webView setValue:@NO forKey:@"drawsBackground"]; // transparent page
-    if (@available(macOS 13.3, *)) { self.webView.inspectable = YES; }
-
-    NSURL *url = [[NSBundle mainBundle] URLForResource:@"index" withExtension:@"html"];
-    if (url) [self.webView loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
-
-    // transparent overlay spanning EVERY connected display
-    // (with "Displays have separate Spaces" on, macOS clips a window to one screen — pin to the primary instead)
-    NSRect union_ = [self overlayFrame];
-    self.window = [[OverlayWindow alloc] initWithContentRect:union_
-                                                   styleMask:NSWindowStyleMaskBorderless
-                                                     backing:NSBackingStoreBuffered
-                                                       defer:NO];
-    self.window.opaque = NO;
-    self.window.backgroundColor = [NSColor clearColor];
-    self.window.hasShadow = NO;
     self.floatOnTop = NO;
-    self.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1; // lives ON the desktop, under app windows
-    // visible on every Space of its display (a Space switch must never strand the notes),
-    // and allowed to appear over full-screen apps while temporarily floating
-    self.window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                     NSWindowCollectionBehaviorFullScreenAuxiliary |
-                                     NSWindowCollectionBehaviorStationary |
-                                     NSWindowCollectionBehaviorIgnoresCycle;
-    self.window.ignoresMouseEvents = YES; // click-through until the cursor is over a note
-    self.window.releasedWhenClosed = NO;
-    self.window.contentView = self.webView;
-    [self.window setFrame:union_ display:YES];
-    [self.window orderFrontRegardless];
 
-    // monitors plugged/unplugged -> re-span the overlay
+    // one transparent overlay per display, each with its own note store
+    self.overlays = [NSMutableArray array];
+    [self rebuildOverlays];
+
+    // monitors plugged/unplugged -> add/remove per-display overlays
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidChangeScreenParametersNotification
         object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        [self.window setFrame:[self overlayFrame] display:YES];
-        [self pushTopInset];
-        [self.webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
+        [self rebuildOverlays];
     }];
 
     __weak typeof(self) weakSelf = self;
@@ -178,49 +152,157 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [NSEvent addLocalMonitorForEventsMatchingMask:(moveMask | NSEventMaskLeftMouseDown)
                                           handler:^NSEvent *(NSEvent *e) {
         [weakSelf updateMousePassthrough];
-        if (e.type == NSEventTypeLeftMouseDown && !weakSelf.window.ignoresMouseEvents) {
-            [NSApp activateIgnoringOtherApps:YES];
-            [weakSelf.window makeKeyWindow];
+        if (e.type == NSEventTypeLeftMouseDown) {
+            ScreenOverlay *ov = [weakSelf overlayUnderMouse];
+            if (ov && !ov.window.ignoresMouseEvents) {
+                [NSApp activateIgnoringOtherApps:YES];
+                [ov.window makeKeyWindow];
+            }
         }
         return e;
     }];
+}
+
+/* ---------- per-display overlays ---------- */
+
+- (ScreenOverlay *)overlayForWebView:(WKWebView *)wv {
+    for (ScreenOverlay *o in self.overlays) if (o.webView == wv) return o;
+    return nil;
+}
+
+- (ScreenOverlay *)overlayUnderMouse {
+    NSPoint m = [NSEvent mouseLocation];
+    for (ScreenOverlay *o in self.overlays) if (NSMouseInRect(m, o.window.frame, NO)) return o;
+    return nil;
+}
+
+// stable per-display key so each monitor keeps its own notes across reconnects
+- (NSString *)displayKeyForScreen:(NSScreen *)s {
+    NSNumber *num = s.deviceDescription[@"NSScreenNumber"];
+    CFUUIDRef u = num ? CGDisplayCreateUUIDFromDisplayID(num.unsignedIntValue) : NULL;
+    if (!u) return [NSString stringWithFormat:@"id%@", num];
+    NSString *str = CFBridgingRelease(CFUUIDCreateString(NULL, u));
+    CFRelease(u);
+    return str;
+}
+
+- (void)rebuildOverlays {
+    NSMutableArray<ScreenOverlay *> *keep = [NSMutableArray array];
+    NSArray<NSScreen *> *screens = NSScreen.screens;
+    for (NSUInteger i = 0; i < screens.count; i++) {
+        NSScreen *s = screens[i];
+        // the primary display keeps the original store key, so pre-existing notes stay put
+        NSString *suffix = (i == 0) ? @"" : [self displayKeyForScreen:s];
+        ScreenOverlay *ov = nil;
+        for (ScreenOverlay *o in self.overlays)
+            if ([o.suffix isEqualToString:suffix] && ![keep containsObject:o]) { ov = o; break; }
+        if (ov) {
+            [ov.window setFrame:s.frame display:YES];
+            [self pushTopInsetFor:ov];
+            [ov.webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
+        } else {
+            ov = [self makeOverlayForScreen:s suffix:suffix];
+        }
+        [keep addObject:ov];
+    }
+    for (ScreenOverlay *o in self.overlays) {
+        if (![keep containsObject:o]) { // display unplugged: its notes wait in storage for its return
+            if (self.editorOverlay == o) [self closeEditorWindow];
+            [o.window orderOut:nil];
+        }
+    }
+    [self.overlays setArray:keep];
+}
+
+- (ScreenOverlay *)makeOverlayForScreen:(NSScreen *)s suffix:(NSString *)suffix {
+    ScreenOverlay *ov = [ScreenOverlay new];
+    ov.suffix = suffix;
+
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+    [config.userContentController addScriptMessageHandler:self name:@"hit"];
+    [config.userContentController addScriptMessageHandler:self name:@"dict"];
+    [config.userContentController addScriptMessageHandler:self name:@"notify"];
+    [config.userContentController addScriptMessageHandler:self name:@"backup"];
+    // which note store this display reads/writes — must exist before the page script runs
+    [config.userContentController addUserScript:
+        [[WKUserScript alloc] initWithSource:[NSString stringWithFormat:@"window.__screenKey=%@;", JSStr(suffix)]
+                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                            forMainFrameOnly:YES]];
+
+    ov.webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:config];
+    ov.webView.UIDelegate = self;
+    ov.webView.navigationDelegate = self;
+    [ov.webView setValue:@NO forKey:@"drawsBackground"]; // transparent page
+    if (@available(macOS 13.3, *)) { ov.webView.inspectable = YES; }
+    NSURL *url = [[NSBundle mainBundle] URLForResource:@"index" withExtension:@"html"];
+    if (url) [ov.webView loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
+
+    ov.window = [[OverlayWindow alloc] initWithContentRect:s.frame
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered
+                                                     defer:NO];
+    ov.window.opaque = NO;
+    ov.window.backgroundColor = [NSColor clearColor];
+    ov.window.hasShadow = NO;
+    ov.window.level = self.floatOnTop ? NSFloatingWindowLevel
+                                      : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1; // ON the desktop, under app windows
+    // visible on every Space of its display (a Space switch must never strand the notes),
+    // and allowed to appear over full-screen apps while temporarily floating
+    ov.window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                   NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                   NSWindowCollectionBehaviorStationary |
+                                   NSWindowCollectionBehaviorIgnoresCycle;
+    ov.window.ignoresMouseEvents = YES; // click-through until the cursor is over a note
+    ov.window.releasedWhenClosed = NO;
+    ov.window.contentView = ov.webView;
+    [ov.window setFrame:s.frame display:YES];
+    if (!self.hiddenAll) [ov.window orderFrontRegardless];
+    return ov;
 }
 
 // user switched to another app / clicked the desktop: end any in-note editing so controls hide
 - (void)applicationDidResignActive:(NSNotification *)notification {
     if (self.tempFloat) { // a freshly created note settles back onto the desktop
         self.tempFloat = NO;
-        if (!self.floatOnTop) self.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
+        if (!self.floatOnTop)
+            for (ScreenOverlay *o in self.overlays)
+                o.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
     }
-    [self.webView evaluateJavaScript:
-        @"try{if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();"
-        @"var s=window.getSelection&&window.getSelection();if(s&&s.removeAllRanges)s.removeAllRanges();}catch(e){}"
-        @"(function(){var b=document.body;b.style.pointerEvents='none';setTimeout(function(){b.style.pointerEvents='';},30);})();"
-                      completionHandler:nil];
+    for (ScreenOverlay *o in self.overlays)
+        [o.webView evaluateJavaScript:
+            @"try{if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();"
+            @"var s=window.getSelection&&window.getSelection();if(s&&s.removeAllRanges)s.removeAllRanges();}catch(e){}"
+            @"(function(){var b=document.body;b.style.pointerEvents='none';setTimeout(function(){b.style.pointerEvents='';},30);})();"
+                        completionHandler:nil];
 }
 
 - (void)updateMousePassthrough {
-    if (self.hiddenAll || self.editorOpen) return; // editor lives in a normal window; no passthrough games
+    if (self.hiddenAll || self.editorOverlay) return; // editor lives in a normal window; no passthrough games
     NSPoint p = [NSEvent mouseLocation];
-    NSRect f = self.window.frame;
-    CGFloat vx = p.x - f.origin.x;
-    CGFloat vy = f.size.height - (p.y - f.origin.y); // flip to top-left origin (web coords)
-    BOOL inside = NO;
-    for (NSValue *v in self.hitRects) {
-        NSRect r = v.rectValue;
-        if (vx >= r.origin.x - 8 && vx <= r.origin.x + r.size.width + 8 &&
-            vy >= r.origin.y - 8 && vy <= r.origin.y + r.size.height + 8) { inside = YES; break; }
-    }
-    BOOL ignore = !inside;
-    if (self.window.ignoresMouseEvents != ignore) {
-        self.window.ignoresMouseEvents = ignore;
-        if (ignore) {
-            // cursor left the notes: WebKit will never get a mouseleave, so force-clear hover states
-            [self.webView evaluateJavaScript:
-                @"document.querySelectorAll('.note.hov').forEach(function(n){n.classList.remove('hov');});"
-                @"(function(){var b=document.body;b.style.pointerEvents='none';"
-                @"setTimeout(function(){b.style.pointerEvents='';},30);})()"
-                              completionHandler:nil];
+    for (ScreenOverlay *ov in self.overlays) {
+        NSRect f = ov.window.frame;
+        BOOL inside = NO;
+        if (NSMouseInRect(p, f, NO)) {
+            CGFloat vx = p.x - f.origin.x;
+            CGFloat vy = f.size.height - (p.y - f.origin.y); // flip to top-left origin (web coords)
+            for (NSValue *v in ov.hitRects) {
+                NSRect r = v.rectValue;
+                if (vx >= r.origin.x - 8 && vx <= r.origin.x + r.size.width + 8 &&
+                    vy >= r.origin.y - 8 && vy <= r.origin.y + r.size.height + 8) { inside = YES; break; }
+            }
+        }
+        BOOL ignore = !inside;
+        if (ov.window.ignoresMouseEvents != ignore) {
+            ov.window.ignoresMouseEvents = ignore;
+            if (ignore) {
+                // cursor left the notes: WebKit will never get a mouseleave, so force-clear hover states
+                [ov.webView evaluateJavaScript:
+                    @"document.querySelectorAll('.note.hov').forEach(function(n){n.classList.remove('hov');});"
+                    @"(function(){var b=document.body;b.style.pointerEvents='none';"
+                    @"setTimeout(function(){b.style.pointerEvents='';},30);})()"
+                                  completionHandler:nil];
+            }
         }
     }
 }
@@ -230,7 +312,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     if ([message.name isEqualToString:@"dict"]) {
         NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
         NSString *cmd = b[@"cmd"];
-        if ([cmd isEqualToString:@"start"]) [self startDictation];
+        if ([cmd isEqualToString:@"start"]) { self.dictWebView = message.webView; [self startDictation]; }
         else if ([cmd isEqualToString:@"stop"]) [self stopDictationAndFinalize];
         return;
     }
@@ -238,12 +320,13 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
         NSString *cmd = b[@"cmd"];
         if ([cmd isEqualToString:@"close"]) { [self.panelWindow orderOut:nil]; }
-        else if ([cmd isEqualToString:@"changed"]) { // settings edited storage -> desktop view refreshes
-            [self.webView evaluateJavaScript:@"window.__reloadNotes&&window.__reloadNotes();" completionHandler:nil];
+        else if ([cmd isEqualToString:@"changed"]) { // settings edited storage -> desktop views refresh
+            for (ScreenOverlay *o in self.overlays)
+                [o.webView evaluateJavaScript:@"window.__reloadNotes&&window.__reloadNotes();" completionHandler:nil];
         } else if ([cmd isEqualToString:@"openNote"]) {
             [self.panelWindow orderOut:nil];
             NSString *nid = [b[@"id"] isKindOfClass:[NSString class]] ? b[@"id"] : @"";
-            [self.webView evaluateJavaScript:
+            [self.overlays.firstObject.webView evaluateJavaScript: // panel shares the primary display's store
                 [NSString stringWithFormat:@"window.__expandNoteById&&window.__expandNoteById(%@);", JSStr(nid)]
                                completionHandler:nil];
         }
@@ -255,12 +338,17 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         return;
     }
     if ([message.name isEqualToString:@"backup"]) {
-        if ([message.body isKindOfClass:[NSString class]]) [self writeBackup:message.body];
+        if ([message.body isKindOfClass:[NSString class]]) {
+            ScreenOverlay *src = [self overlayForWebView:message.webView];
+            [self writeBackup:message.body suffix:(src.suffix ?: @"")];
+        }
         return;
     }
     if (![message.name isEqualToString:@"hit"]) return;
     NSDictionary *body = message.body;
     if (![body isKindOfClass:[NSDictionary class]]) return;
+    ScreenOverlay *ov = [self overlayForWebView:message.webView];
+    if (!ov) return;
     NSArray *arr = body[@"r"];
     BOOL expanded = [body[@"x"] boolValue];
     if ([arr isKindOfClass:[NSArray class]]) {
@@ -271,16 +359,15 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
                                                                    [r[2] doubleValue], [r[3] doubleValue])]];
             }
         }
-        self.hitRects = rects;
+        ov.hitRects = rects;
     }
     // editor opens as a REAL app window so macOS (incl. Stage Manager) treats it like launching an app
-    if (expanded != self.editorOpen) {
-        self.editorOpen = expanded;
-        if (expanded) [self openEditorWindow]; else [self closeEditorWindow];
-    }
+    if (expanded && !self.editorOverlay) [self openEditorWindowFor:ov];
+    else if (!expanded && self.editorOverlay == ov) [self closeEditorWindow];
 }
 
-- (void)openEditorWindow {
+- (void)openEditorWindowFor:(ScreenOverlay *)ov {
+    self.editorOverlay = ov;
     if (!self.editorWindow) {
         NSRect scr = [NSScreen mainScreen].visibleFrame;
         CGFloat w = MIN(920, scr.size.width * 0.72), h = MIN(820, scr.size.height * 0.86);
@@ -303,29 +390,34 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         self.editorWindow.delegate = self;
         [self.editorWindow setFrameAutosaveName:@"DeskNotesEditor"];
     }
-    [self.webView evaluateJavaScript:@"document.documentElement.classList.add('winmode');" completionHandler:nil];
-    self.editorWindow.contentView = self.webView;      // move the page into the app window
-    [self.window orderOut:nil];                        // desktop layer rests while editing
+    [ov.webView evaluateJavaScript:@"document.documentElement.classList.add('winmode');" completionHandler:nil];
+    self.editorWindow.contentView = ov.webView;        // move the page into the app window
+    [ov.window orderOut:nil];                          // that display's desktop layer rests while editing
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; // macOS: "an app just opened"
     [self.editorWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
 - (void)closeEditorWindow {
-    [self.webView evaluateJavaScript:@"document.documentElement.classList.remove('winmode');" completionHandler:nil];
-    self.window.contentView = self.webView;            // page returns to the desktop overlay
+    ScreenOverlay *ov = self.editorOverlay;
+    if (!ov) return;
+    [ov.webView evaluateJavaScript:@"document.documentElement.classList.remove('winmode');" completionHandler:nil];
+    ov.window.contentView = ov.webView;                // page returns to its desktop overlay
     [self.editorWindow orderOut:nil];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory]; // back to menu-bar-only
     self.tempFloat = NO;
-    self.window.level = self.floatOnTop ? NSFloatingWindowLevel
-                                        : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
-    [self.window orderFrontRegardless];
+    for (ScreenOverlay *o in self.overlays) {
+        o.window.level = self.floatOnTop ? NSFloatingWindowLevel
+                                         : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
+        if (!self.hiddenAll) [o.window orderFrontRegardless];
+    }
+    self.editorOverlay = nil;
 }
 
 // red close button on the editor window = minimize back to the desktop note
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     if (sender == self.editorWindow) {
-        [self.webView evaluateJavaScript:@"window.__closeExpand&&window.__closeExpand();" completionHandler:nil];
+        [self.editorOverlay.webView evaluateJavaScript:@"window.__closeExpand&&window.__closeExpand();" completionHandler:nil];
         return NO;
     }
     if (sender == self.panelWindow) { [self.panelWindow orderOut:nil]; return NO; }
@@ -356,9 +448,12 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     @"  try{window.webkit.messageHandlers.hit.postMessage({r:rs,x:xo});}catch(e){}"
     @"},120);}";
     [webView evaluateJavaScript:js completionHandler:nil];
-    [self pushTopInset];
-    // notes saved under an older multi-screen frame may sit outside the current window — pull them back
-    [webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
+    ScreenOverlay *ov = [self overlayForWebView:webView];
+    if (ov) {
+        [self pushTopInsetFor:ov];
+        // notes saved under an older frame may sit outside this display — pull them back
+        [webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
+    }
 }
 
 // dropdown contents (rebuilt each time it opens)
@@ -402,87 +497,53 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     }
 }
 
-// the notes board lives on ONE screen (separate Spaces forbids spanning) — summon it to the
-// screen whose menu bar the user clicked, and remember that screen for the next launch
-- (void)retargetOverlay {
-    if (!NSScreen.screensHaveSeparateSpaces) return; // spanning window already covers everything
-    NSPoint m = [NSEvent mouseLocation];
-    NSScreen *target = nil;
-    for (NSScreen *s in NSScreen.screens) if (NSMouseInRect(m, s.frame, NO)) { target = s; break; }
-    if (!target) return;
-    [[NSUserDefaults standardUserDefaults] setObject:NSStringFromPoint(target.frame.origin)
-                                              forKey:@"OverlayScreenOrigin"];
-    if (NSEqualRects(self.window.frame, target.frame)) return;
-    [self.window setFrame:target.frame display:YES];
-    [self pushTopInset];
-    [self.webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
-}
-
 - (void)showTutorial {
     if (self.hiddenAll) [self toggleAll];
-    [self retargetOverlay];
-    [self.webView evaluateJavaScript:@"window.__addTutorial&&window.__addTutorial();" completionHandler:nil];
+    ScreenOverlay *ov = [self overlayUnderMouse] ?: self.overlays.firstObject; // screen whose menu bar was clicked
+    [ov.webView evaluateJavaScript:@"window.__addTutorial&&window.__addTutorial();" completionHandler:nil];
 }
 
 - (void)newNote {
     if (self.hiddenAll) [self toggleAll];
-    [self retargetOverlay];
+    ScreenOverlay *ov = [self overlayUnderMouse] ?: self.overlays.firstObject; // screen whose menu bar was clicked
+    if (!ov) return;
     if (!self.floatOnTop) { // surface the new note even over full-screen apps; sinks on click-away
         self.tempFloat = YES;
-        self.window.level = NSFloatingWindowLevel;
+        ov.window.level = NSFloatingWindowLevel;
     }
-    [self.window orderFrontRegardless];
+    [ov.window orderFrontRegardless];
     [NSApp activateIgnoringOtherApps:YES];
-    [self.window makeKeyWindow];
-    [self.webView evaluateJavaScript:@"window.__addNote && window.__addNote();" completionHandler:nil];
+    [ov.window makeKeyWindow];
+    [ov.webView evaluateJavaScript:@"window.__addNote && window.__addNote();" completionHandler:nil];
 }
 
 - (void)togglePin {
     self.floatOnTop = !self.floatOnTop;
     self.tempFloat = NO;
-    self.window.level = self.floatOnTop ? NSFloatingWindowLevel
-                                        : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
+    for (ScreenOverlay *o in self.overlays)
+        o.window.level = self.floatOnTop ? NSFloatingWindowLevel
+                                         : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
 }
 
 - (void)toggleAll {
     self.hiddenAll = !self.hiddenAll;
-    if (self.hiddenAll) {
-        [self.window orderOut:nil];
-        self.window.ignoresMouseEvents = YES;
-    } else {
-        [self retargetOverlay];
-        [self.window orderFrontRegardless];
+    for (ScreenOverlay *o in self.overlays) {
+        if (self.hiddenAll) {
+            [o.window orderOut:nil];
+            o.window.ignoresMouseEvents = YES;
+        } else {
+            [o.window orderFrontRegardless];
+        }
     }
-}
-
-- (NSRect)allScreensFrame {
-    NSRect u = NSZeroRect;
-    for (NSScreen *s in NSScreen.screens) u = NSUnionRect(u, s.frame);
-    return NSIsEmptyRect(u) ? NSScreen.mainScreen.frame : u;
-}
-
-// "Displays have separate Spaces" (the default) clips any window to a single display,
-// so a union-of-screens overlay renders on only one screen and everything else vanishes.
-// In that mode the overlay lives on the screen the user last summoned notes to.
-- (NSRect)overlayFrame {
-    if (!NSScreen.screensHaveSeparateSpaces) return [self allScreensFrame];
-    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"OverlayScreenOrigin"];
-    if (saved) {
-        NSPoint o = NSPointFromString(saved);
-        for (NSScreen *s in NSScreen.screens)
-            if (NSEqualPoints(s.frame.origin, o)) return s.frame;
-    }
-    NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
-    return primary.frame;
 }
 
 // tell the page where the menu bar ends, so notes can rise exactly as high as Apple's widgets
-- (void)pushTopInset {
-    NSScreen *s = self.window.screen ?: (NSScreen.screens.firstObject ?: NSScreen.mainScreen);
-    NSRect f = self.window.frame;
+- (void)pushTopInsetFor:(ScreenOverlay *)ov {
+    NSScreen *s = ov.window.screen ?: (NSScreen.screens.firstObject ?: NSScreen.mainScreen);
+    NSRect f = ov.window.frame;
     CGFloat inset = (NSMaxY(f) - NSMaxY(s.visibleFrame)) + 12;
-    [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__topInset=%.0f;", inset]
-                   completionHandler:nil];
+    [ov.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__topInset=%.0f;", inset]
+                 completionHandler:nil];
 }
 
 /* ---------- reminder notifications ---------- */
@@ -517,8 +578,10 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     return dir;
 }
 
-- (void)writeBackup:(NSString *)json {
-    NSString *path = [[self backupDir] stringByAppendingPathComponent:@"notes-backup.json"];
+- (void)writeBackup:(NSString *)json suffix:(NSString *)suffix {
+    NSString *name = suffix.length ? [NSString stringWithFormat:@"notes-backup-%@.json", suffix]
+                                   : @"notes-backup.json"; // primary display keeps the original filename
+    NSString *path = [[self backupDir] stringByAppendingPathComponent:name];
     [json writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -606,7 +669,10 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 /* ---------- local Whisper dictation ---------- */
 
 - (void)sendDictJS:(NSString *)js {
-    dispatch_async(dispatch_get_main_queue(), ^{ [self.webView evaluateJavaScript:js completionHandler:nil]; });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        WKWebView *wv = self.dictWebView ?: self.overlays.firstObject.webView; // reply to the view that started dictating
+        [wv evaluateJavaScript:js completionHandler:nil];
+    });
 }
 
 - (void)dictError:(NSString *)msg {

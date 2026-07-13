@@ -569,7 +569,9 @@
   var desk = document.getElementById('desk');
   var hint = document.getElementById('hint');
   var countEl = document.getElementById('count');
-  var STORE = 'notes.app.v5';
+  // each display gets its own note set: the native shell injects __screenKey ('' = primary display,
+  // which keeps the original key so existing notes stay put)
+  var STORE = 'notes.app.v5' + (window.__screenKey ? '.' + window.__screenKey : '');
   function __top() { return (window.__topInset || 58); } // notes may rise to just under the menu bar
 
   var SOLIDS = [
@@ -1544,6 +1546,7 @@
     if (activeRec && activeRec.el === el) stopDictation();
     try { // deleted notes live on in History until deleted forever
       var snap = JSON.parse(JSON.stringify(n)); delete snap.files;
+      loadArch(); // the archive is shared across displays — re-read so another screen's deletes survive
       snap.deletedAt = Date.now(); archive.push(snap); saveArch();
     } catch (e) {}
     el.classList.add('leaving');
@@ -2197,6 +2200,7 @@
   }
   function renderHistoryList() {
     if (!histList) return;
+    loadArch(); // shared across displays — render (and splice) against the freshest copy
     var q = (histInput.value || '').trim().toLowerCase();
     var rows = [];
     notes.forEach(function (n) { rows.push({ n: n, live: true, ts: n.updated || 0 }); });
