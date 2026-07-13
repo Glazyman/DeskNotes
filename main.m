@@ -312,9 +312,16 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     NSMenuItem *pin = [menu addItemWithTitle:@"Float Above Apps" action:@selector(togglePin) keyEquivalent:@""];
     pin.state = self.floatOnTop ? NSControlStateValueOn : NSControlStateValueOff;
     pin.target = self;
+    NSMenuItem *tut = [menu addItemWithTitle:@"Show Tutorial Notes" action:@selector(showTutorial) keyEquivalent:@""];
+    tut.target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [menu addItemWithTitle:@"Quit Desk Notes" action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
+}
+
+- (void)showTutorial {
+    if (self.hiddenAll) [self toggleAll];
+    [self.webView evaluateJavaScript:@"window.__addTutorial&&window.__addTutorial();" completionHandler:nil];
 }
 
 - (void)newNote {

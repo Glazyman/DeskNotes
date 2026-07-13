@@ -2038,10 +2038,7 @@
   window.addEventListener('resize', function () { if (selbar && selbar.style.display === 'flex') positionSelbar(); });
 
   /* ---------- boot (must run after all declarations above) ---------- */
-  var saved = load();
-  if (saved && saved.length) {
-    notes = saved; notes.forEach(function (n) { normFill(n); if (n.z && n.z > zTop) zTop = n.z; }); renderAll();
-  } else {
+  function spawnTutorialNotes() {
     var w = window.innerWidth, h = window.innerHeight, now = Date.now();
     var seeds = [
       { fill: { kind: 'preset', id: 'yellow' }, font: 'system', title: 'Welcome to Desk Notes 👋',
@@ -2062,6 +2059,14 @@
         tasks: s.tasks ? s.tasks.map(function (t, ti) { return { id: 't' + now + si + '_' + ti, text: t.text, done: !!t.done }; }) : undefined });
     });
     renderAll(); save();
+  }
+  window.__addTutorial = spawnTutorialNotes; // native menu hook
+
+  var saved = load();
+  if (saved && saved.length) {
+    notes = saved; notes.forEach(function (n) { normFill(n); if (n.z && n.z > zTop) zTop = n.z; }); renderAll();
+  } else {
+    spawnTutorialNotes();
   }
 
   // losing window focus ends editing so hover/editing controls never linger
