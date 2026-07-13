@@ -495,6 +495,51 @@
   html.winmode .note.expanded .tp { top: 42px; left: 86px; }
   html.winmode .note.expanded.exmoved { position: relative !important; }
 
+  /* ---------- History panel ---------- */
+  #histover {
+    position: fixed; inset: 0; z-index: 8600; display: none; align-items: center; justify-content: center; padding: 34px;
+    background: color-mix(in srgb, var(--ground-2) 78%, transparent);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+  }
+  #histover.open { display: flex; }
+  .histpanel {
+    width: min(720px, 94vw); height: min(78vh, 820px); display: flex; flex-direction: column;
+    background: var(--card); border: 1px solid var(--card-border); border-radius: 20px; box-shadow: var(--sh-lift);
+    overflow: hidden; color: var(--ink); font-family: -apple-system, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  }
+  .histhead { display: flex; align-items: center; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--hair); }
+  .histtitle { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+  .histsearch {
+    flex: 1; height: 34px; border: 1px solid var(--card-border); border-radius: 10px;
+    background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink);
+    font: inherit; font-size: 13.5px; padding: 0 12px; outline: none;
+  }
+  .histsearch:focus { border-color: var(--accent); }
+  .histclose { border: none; background: transparent; color: var(--ink-soft); width: 28px; height: 28px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .histclose:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+  .histlist { flex: 1; overflow-y: auto; padding: 6px 0; }
+  .histrow { display: flex; align-items: center; gap: 13px; padding: 11px 18px; border-bottom: 1px solid var(--hair); }
+  .histrow.dead { opacity: .82; }
+  .histchip { flex: 0 0 auto; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--pill); color: var(--ink-soft); min-width: 52px; text-align: center; }
+  .histchip.live { background: color-mix(in srgb, var(--accent) 26%, transparent); color: var(--ink); }
+  .histmid { flex: 1; min-width: 0; }
+  .histname { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .histsnip { font-size: 12px; color: var(--ink-body); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .histwhen { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+  .histacts { display: flex; gap: 6px; flex: 0 0 auto; }
+  .histbtn {
+    border: 1px solid var(--card-border); background: transparent; color: var(--ink);
+    font: inherit; font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 8px; cursor: pointer;
+  }
+  .histbtn:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+  .histbtn.danger { color: #D64545; border-color: color-mix(in srgb, #D64545 40%, transparent); }
+  .histbtn.danger:hover { background: color-mix(in srgb, #D64545 12%, transparent); }
+  .histempty { padding: 40px; text-align: center; color: var(--ink-soft); font-size: 14px; }
+  /* native app window: history fills the window */
+  html.native #histover { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; padding: 0; }
+  html.winmode #histover .histpanel { width: 100%; height: 100%; border-radius: 0; border: none; box-shadow: none; }
+  html.winmode #histover .histhead { padding-top: 30px; } /* clear the titlebar drag zone */
+
   @media (prefers-reduced-motion: reduce) {
     .note, .note.lift, .note.leaving, .note.sizing { transition: box-shadow .2s ease; }
     .note.spawn { animation: none; } .mp { animation: none; }
@@ -654,6 +699,14 @@
     }, 4000);
   }
   function save() { try { localStorage.setItem(STORE, JSON.stringify(notes)); scheduleBackup(); } catch (e) {} }
+  var ARCH_STORE = 'notes.archive.v1', archive = [];
+  function loadArch() { try { var r = localStorage.getItem(ARCH_STORE); archive = r ? JSON.parse(r) : []; } catch (e) { archive = []; } }
+  function saveArch() {
+    try {
+      if (archive.length > 300) archive = archive.slice(-300);
+      localStorage.setItem(ARCH_STORE, JSON.stringify(archive));
+    } catch (e) {}
+  }
   function load() { try { var r = localStorage.getItem(STORE); if (r) return JSON.parse(r); } catch (e) {} return null; }
 
   /* ---------- theme ---------- */
@@ -1476,6 +1529,10 @@
     if (expandedNote === el) closeExpand(); // deleting from the big view closes the window too
     if (openMenuEl === el) openMenuEl = null;
     if (activeRec && activeRec.el === el) stopDictation();
+    try { // deleted notes live on in History until deleted forever
+      var snap = JSON.parse(JSON.stringify(n)); delete snap.files;
+      snap.deletedAt = Date.now(); archive.push(snap); saveArch();
+    } catch (e) {}
     el.classList.add('leaving');
     setTimeout(function () { el.remove(); notes = notes.filter(function (x) { return x.id !== n.id; }); updateCount(); save(); }, 240);
   }
@@ -2050,8 +2107,13 @@
     if (subMode && (!e.target.closest || !e.target.closest('#selbar'))) { exitSub(); hideSelbar(); }
   }, true);
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { if (subMode) { exitSub(); hideSelbar(); } else if (expandedNote) closeExpand(); }
+    if (e.key === 'Escape') {
+      if (subMode) { exitSub(); hideSelbar(); }
+      else if (histover && histover.classList.contains('open')) closeHistory();
+      else if (expandedNote) closeExpand();
+    }
   });
+  loadArch();
   window.addEventListener('scroll', function () { if (selbar && selbar.style.display === 'flex') positionSelbar(); }, true);
   window.addEventListener('resize', function () { if (selbar && selbar.style.display === 'flex') positionSelbar(); });
 
@@ -2080,17 +2142,98 @@
   }
   window.__addTutorial = spawnTutorialNotes; // native menu hook
 
-  // menu-bar search: filter desktop notes live while typing
-  window.__searchNotes = function (q) {
-    q = (q || '').trim().toLowerCase();
-    notes.forEach(function (n) {
-      var el = desk.querySelector('.note[data-id="' + n.id + '"]'); if (!el) return;
-      var hay = ((n.title || '') + ' ' + (n.text || '') + ' ' +
-        (n.tasks || []).map(function (t) { return t.text; }).join(' ') + ' ' +
-        (n.reminders || []).map(function (r) { return r.text; }).join(' ')).toLowerCase();
-      el.style.display = (!q || hay.indexOf(q) >= 0) ? '' : 'none';
+  /* ---------- History: every note, live and deleted, searchable ---------- */
+  var histover = null, histInput = null, histList = null;
+  function noteHay(n) {
+    return ((n.title || '') + ' ' + (n.text || '') + ' ' +
+      (n.tasks || []).map(function (t) { return t.text; }).join(' ') + ' ' +
+      (n.reminders || []).map(function (r) { return r.text; }).join(' ')).toLowerCase();
+  }
+  function histDate(ts) {
+    try { return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+      new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; }
+  }
+  function buildHistory() {
+    histover = document.createElement('div'); histover.id = 'histover';
+    var panel = document.createElement('div'); panel.className = 'histpanel';
+    var head = document.createElement('div'); head.className = 'histhead';
+    var h = document.createElement('div'); h.className = 'histtitle'; h.textContent = 'History';
+    histInput = document.createElement('input'); histInput.className = 'histsearch'; histInput.placeholder = 'Search all notes…';
+    histInput.addEventListener('input', renderHistoryList);
+    var x = document.createElement('button'); x.className = 'histclose'; x.innerHTML = '✕'; x.title = 'Close';
+    x.addEventListener('click', closeHistory);
+    head.appendChild(h); head.appendChild(histInput); head.appendChild(x);
+    histList = document.createElement('div'); histList.className = 'histlist';
+    panel.appendChild(head); panel.appendChild(histList);
+    histover.appendChild(panel);
+    histover.addEventListener('pointerdown', function (e) { if (e.target === histover) closeHistory(); });
+    document.body.appendChild(histover);
+  }
+  function renderHistoryList() {
+    if (!histList) return;
+    var q = (histInput.value || '').trim().toLowerCase();
+    var rows = [];
+    notes.forEach(function (n) { rows.push({ n: n, live: true, ts: n.updated || 0 }); });
+    archive.forEach(function (n, i) { rows.push({ n: n, live: false, ai: i, ts: n.deletedAt || n.updated || 0 }); });
+    rows.sort(function (a, b) { return b.ts - a.ts; });
+    if (q) rows = rows.filter(function (r) { return noteHay(r.n).indexOf(q) >= 0; });
+    histList.innerHTML = '';
+    if (!rows.length) {
+      var em = document.createElement('div'); em.className = 'histempty';
+      em.textContent = q ? 'No notes match “' + q + '”' : 'Nothing here yet';
+      histList.appendChild(em); return;
+    }
+    rows.forEach(function (r) {
+      var n = r.n;
+      var row = document.createElement('div'); row.className = 'histrow' + (r.live ? '' : ' dead');
+      var chip = document.createElement('span'); chip.className = 'histchip' + (r.live ? ' live' : '');
+      chip.textContent = r.live ? 'Active' : 'Deleted';
+      var mid = document.createElement('div'); mid.className = 'histmid';
+      var t = document.createElement('div'); t.className = 'histname';
+      t.textContent = (n.title || '').trim() || ((n.text || '').trim().split('\n')[0] || 'Untitled').slice(0, 40);
+      var s = document.createElement('div'); s.className = 'histsnip';
+      var snip = (n.type === 'task') ? (n.tasks || []).map(function (tk) { return tk.text; }).join(' · ')
+               : (n.type === 'cal') ? (n.reminders || []).map(function (rm) { return rm.text; }).join(' · ')
+               : (n.text || '');
+      s.textContent = (snip || '').slice(0, 90);
+      var d = document.createElement('div'); d.className = 'histwhen'; d.textContent = (r.live ? 'Edited ' : 'Deleted ') + histDate(r.ts);
+      mid.appendChild(t); if (s.textContent) mid.appendChild(s); mid.appendChild(d);
+      var acts = document.createElement('div'); acts.className = 'histacts';
+      function actBtn(label, cls, fn) {
+        var b = document.createElement('button'); b.className = 'histbtn ' + (cls || ''); b.textContent = label;
+        b.addEventListener('click', function (e) { e.stopPropagation(); fn(); }); acts.appendChild(b);
+      }
+      if (r.live) {
+        actBtn('Open', '', function () {
+          closeHistory();
+          var el = desk.querySelector('.note[data-id="' + n.id + '"]');
+          if (el) setTimeout(function () { openExpand(el, n); }, 60);
+        });
+      } else {
+        actBtn('Restore', '', function () {
+          archive.splice(r.ai, 1); saveArch();
+          n.deletedAt = undefined; n.z = ++zTop;
+          n.x = Math.max(20, window.innerWidth / 2 - 125); n.y = Math.max(76, window.innerHeight / 2 - 115);
+          notes.push(n); save(); renderAll(); renderHistoryList(); toast('Note restored');
+        });
+        actBtn('Delete Forever', 'danger', function () {
+          archive.splice(r.ai, 1); saveArch(); renderHistoryList(); toast('Deleted forever');
+        });
+      }
+      row.appendChild(chip); row.appendChild(mid); row.appendChild(acts);
+      histList.appendChild(row);
     });
-  };
+  }
+  function openHistory(focusSearch) {
+    if (!histover) buildHistory();
+    closeMenu(); closeType();
+    if (expandedNote) closeExpand();
+    histover.classList.add('open');
+    histInput.value = ''; renderHistoryList();
+    if (focusSearch) setTimeout(function () { histInput.focus(); }, 120);
+  }
+  function closeHistory() { if (histover) histover.classList.remove('open'); }
+  window.__openHistory = openHistory;
 
   // reminders fire real notifications when due (checked every 30s)
   function checkReminders() {

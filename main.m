@@ -314,7 +314,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     @"  var ov=document.getElementById('overlay');"
     @"  var t=document.getElementById('__toast');"
     @"  if(t&&t.style.opacity==='1'){var r=t.getBoundingClientRect();rs.push([r.left,r.top,r.width,r.height]);}"
-    @"  var xo=!!(ov&&ov.classList.contains('open'));"
+    @"  var ho=document.getElementById('histover');"
+    @"  var xo=!!((ov&&ov.classList.contains('open'))||(ho&&ho.classList.contains('open')));"
     @"  try{window.webkit.messageHandlers.hit.postMessage({r:rs,x:xo});}catch(e){}"
     @"},120);}";
     [webView evaluateJavaScript:js completionHandler:nil];
@@ -323,19 +324,12 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 // dropdown contents (rebuilt each time it opens)
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     [menu removeAllItems];
-    // live search across notes
-    NSMenuItem *searchItem = [[NSMenuItem alloc] init];
-    NSView *wrap = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 238, 30)];
-    NSSearchField *sf = [[NSSearchField alloc] initWithFrame:NSMakeRect(10, 3, 218, 24)];
-    sf.placeholderString = @"Search notes…";
-    sf.target = self; sf.action = @selector(searchChanged:);
-    [sf.cell setSendsSearchStringImmediately:YES];
-    [wrap addSubview:sf];
-    searchItem.view = wrap;
-    [menu addItem:searchItem];
-    [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *add = [menu addItemWithTitle:@"New Note" action:@selector(newNote) keyEquivalent:@"n"];
     add.target = self;
+    NSMenuItem *srch = [menu addItemWithTitle:@"Search Notes…" action:@selector(openSearch) keyEquivalent:@"f"];
+    srch.target = self;
+    NSMenuItem *hist = [menu addItemWithTitle:@"History…" action:@selector(openHistory) keyEquivalent:@""];
+    hist.target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *toggle = [menu addItemWithTitle:(self.hiddenAll ? @"Show Notes" : @"Hide Notes")
                                          action:@selector(toggleAll) keyEquivalent:@""];
@@ -446,16 +440,16 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[self backupDir]]];
 }
 
-/* ---------- search (menu bar) ---------- */
+/* ---------- search & history (open in the app window) ---------- */
 
-- (void)searchChanged:(NSSearchField *)sf {
-    [self.webView evaluateJavaScript:
-        [NSString stringWithFormat:@"window.__searchNotes&&window.__searchNotes(%@);", JSStr(sf.stringValue)]
-                   completionHandler:nil];
+- (void)openSearch {
+    if (self.hiddenAll) [self toggleAll];
+    [self.webView evaluateJavaScript:@"window.__openHistory&&window.__openHistory(true);" completionHandler:nil];
 }
 
-- (void)menuDidClose:(NSMenu *)menu { // menu closed -> clear the filter
-    [self.webView evaluateJavaScript:@"window.__searchNotes&&window.__searchNotes('');" completionHandler:nil];
+- (void)openHistory {
+    if (self.hiddenAll) [self toggleAll];
+    [self.webView evaluateJavaScript:@"window.__openHistory&&window.__openHistory(false);" completionHandler:nil];
 }
 
 /* ---------- check for updates ---------- */
