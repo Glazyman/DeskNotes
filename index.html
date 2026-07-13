@@ -2044,17 +2044,22 @@
   } else {
     var w = window.innerWidth, h = window.innerHeight, now = Date.now();
     var seeds = [
-      { fill: { kind: 'preset', id: 'paper' }, font: 'system', title: "This Week's Goals",
-        text: '• Ship the notes prototype\n• Learn about product design\n• Finish the book — c’mon!\n\nBlockers:\n• Not enough time after work', dx: -330, dy: -70, w: 288, h: 264, upd: now - 120000 },
-      { fill: { kind: 'preset', id: 'yellow' }, font: 'system', title: 'Grocery run',
-        text: '1. Olive oil\n2. Sourdough\n3. Lemons', dx: 10, dy: -120, upd: now - 3600000 },
-      { fill: { kind: 'gradient', id: 'ocean' }, font: 'serif', title: 'Try everything',
-        text: '• Drag the top edge to move\n• Drag the corner to resize\n• Tap the color dot for colors, gradients + fonts', dx: 20, dy: 40, upd: now - 45000 }
+      { fill: { kind: 'preset', id: 'yellow' }, font: 'system', title: 'Welcome to Desk Notes 👋',
+        text: '• Double-tap me to open the big editor\n• Hover me — a header appears up top\n• Tap the ○ circle for colors, fonts + options\n• Tap the ☰ lines to switch Note · Task · Calendar\n• Tap the 🎙 mic and speak — words appear at your cursor\n• Drag my header to move me — I snap to edges', dx: -330, dy: -110, w: 306, h: 268, upd: now - 60000 },
+      { type: 'task', fill: { kind: 'preset', id: 'paper' }, font: 'system', title: 'Try a task list ✓',
+        tasks: [
+          { text: 'Check me off', done: false },
+          { text: 'Press Enter to add another task', done: false },
+          { text: 'Try ☰ → Calendar for reminders', done: false },
+          { text: 'Delete me when you’re done', done: true }
+        ], dx: 30, dy: -80, w: 258, upd: now - 30000 }
     ];
-    seeds.forEach(function (s) {
-      notes.push({ id: 'n' + now + Math.floor(Math.random() * 9999) + s.fill.id,
+    seeds.forEach(function (s, si) {
+      notes.push({ id: 'n' + now + si + (s.fill.id || ''),
         x: Math.max(20, w / 2 + s.dx), y: Math.max(76, h / 2 + s.dy),
-        fill: s.fill, font: s.font, title: s.title, text: s.text, w: s.w, h: s.h, updated: s.upd, z: ++zTop });
+        fill: s.fill, font: s.font, title: s.title, text: s.text || '',
+        type: s.type, w: s.w, h: s.h, updated: s.upd, z: ++zTop,
+        tasks: s.tasks ? s.tasks.map(function (t, ti) { return { id: 't' + now + si + '_' + ti, text: t.text, done: !!t.done }; }) : undefined });
     });
     renderAll(); save();
   }
