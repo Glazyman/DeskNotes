@@ -118,7 +118,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     if (url) [self.webView loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
 
     // transparent overlay spanning EVERY connected display
-    NSRect union_ = [self allScreensFrame];
+    // (with "Displays have separate Spaces" on, macOS clips a window to one screen — pin to the primary instead)
+    NSRect union_ = [self overlayFrame];
     self.window = [[OverlayWindow alloc] initWithContentRect:union_
                                                    styleMask:NSWindowStyleMaskBorderless
                                                      backing:NSBackingStoreBuffered
@@ -140,8 +141,9 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     // monitors plugged/unplugged -> re-span the overlay
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidChangeScreenParametersNotification
         object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        [self.window setFrame:[self allScreensFrame] display:YES];
+        [self.window setFrame:[self overlayFrame] display:YES];
         [self pushTopInset];
+        [self.webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
     }];
 
     __weak typeof(self) weakSelf = self;
@@ -346,6 +348,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     @"},120);}";
     [webView evaluateJavaScript:js completionHandler:nil];
     [self pushTopInset];
+    // notes saved under an older multi-screen frame may sit outside the current window — pull them back
+    [webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
 }
 
 // dropdown contents (rebuilt each time it opens)
@@ -424,12 +428,22 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     return NSIsEmptyRect(u) ? NSScreen.mainScreen.frame : u;
 }
 
+// "Displays have separate Spaces" (the default) clips any window to a single display,
+// so a union-of-screens overlay renders on only one screen and everything else vanishes.
+// In that mode the overlay lives on the primary display (the one with the menu bar).
+- (NSRect)overlayFrame {
+    if (NSScreen.screensHaveSeparateSpaces) {
+        NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
+        return primary.frame;
+    }
+    return [self allScreensFrame];
+}
+
 // tell the page where the menu bar ends, so notes can rise exactly as high as Apple's widgets
 - (void)pushTopInset {
-    NSScreen *ms = [NSScreen mainScreen];
-    NSRect u = [self allScreensFrame];
-    CGFloat menuH = NSMaxY(ms.frame) - NSMaxY(ms.visibleFrame);
-    CGFloat inset = (NSMaxY(u) - NSMaxY(ms.frame)) + menuH + 12;
+    NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
+    NSRect f = self.window.frame;
+    CGFloat inset = (NSMaxY(f) - NSMaxY(primary.visibleFrame)) + 12;
     [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__topInset=%.0f;", inset]
                    completionHandler:nil];
 }

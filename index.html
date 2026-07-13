@@ -216,13 +216,13 @@
   .note .grip { position: absolute; top: 0; left: 0; right: 0; height: 30px; cursor: grab; }
   .note.lift .grip { cursor: grabbing; }
 
-  /* one collapsing header row: hidden (zero space) until hover / editing / menu open */
+  /* one collapsing header row: hidden (zero space) until top-zone hover / menu open */
   .note .nhead {
     cursor: grab;
     display: flex; align-items: center; height: 0; opacity: 0; overflow: hidden;
     transition: height .16s ease, opacity .13s ease; position: relative; z-index: 5;
   }
-  .note.hov .nhead, .note.editing .nhead,
+  .note.hov .nhead,
   .note.menu-open .nhead, .note.type-open .nhead, .note.recording .nhead { height: 28px; opacity: 1; }
   .note .tools { display: flex; gap: 2px; }
   .tool {
@@ -475,7 +475,7 @@
   html.native #bar { display: none; }
   html.native #hint { display: none; }
   /* native: reveal is driven by a JS-managed .hov class — stuck CSS hover can never pin controls open */
-  html.native .note:not(.hov):not(.editing):not(.menu-open):not(.type-open):not(.recording) .nhead { height: 0 !important; opacity: 0 !important; }
+  html.native .note:not(.hov):not(.menu-open):not(.type-open):not(.recording) .nhead { height: 0 !important; opacity: 0 !important; }
   html.native .note:not(.hov):not(.expanded) .rz { opacity: 0 !important; }
   html.native .note:not(.hov):not(.editing) .titlerow.tempty { height: 0 !important; overflow: hidden; opacity: 0 !important; }
 
@@ -1424,7 +1424,9 @@
     el.addEventListener('pointerleave', function () { el.classList.remove('hov'); });
     el.addEventListener('pointerdown', function () { if (!el.classList.contains('expanded')) { n.z = ++zTop; el.style.zIndex = n.z; save(); } });
     el.addEventListener('dblclick', function (e) {
-      if (e.target.closest('.titlerow') || e.target.closest('.body') || e.target.closest('.ntbody') || e.target.closest('.tp') || e.target.closest('.mp') || e.target.closest('.tools') || e.target.closest('.files') || e.target.closest('.exbar') || e.target.closest('.minbtn')) return;
+      // only the top header zone (grip strip / revealed header) toggles the big view
+      if (e.target.closest('.tools') || e.target.closest('.minbtn')) return;
+      if (!e.target.closest('.grip') && !e.target.closest('.nhead')) return;
       if (expandedNote === el) closeExpand(); else if (!expandedNote) openExpand(el, n);
     });
     setTimeout(function () { el.classList.remove('spawn'); }, 430);
@@ -2319,6 +2321,14 @@
   window.__addNote = function () {
     addNote(window.innerWidth / 2 - 125 + (Math.random() * 70 - 35),
             Math.max(__top(), window.innerHeight / 2 - 115 + (Math.random() * 50 - 25)));
+  };
+
+  // native shell hook: window frame changed (display plugged/unplugged) -> pull every note back into view
+  window.__clampAll = function () {
+    notes.forEach(function (n) {
+      var el = desk.querySelector('.note[data-id="' + n.id + '"]');
+      if (el && !el.classList.contains('expanded')) clampToScreen(n, el);
+    });
   };
 
   syncTheme(); updateCount();
