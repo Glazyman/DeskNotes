@@ -218,6 +218,7 @@
 
   /* one collapsing header row: hidden (zero space) until hover / editing / menu open */
   .note .nhead {
+    cursor: grab;
     display: flex; align-items: center; height: 0; opacity: 0; overflow: hidden;
     transition: height .16s ease, opacity .13s ease; position: relative; z-index: 5;
   }
@@ -1391,7 +1392,7 @@
     el.appendChild(grip); el.appendChild(nhead);
     var xb = null;
     if (isNote) { xb = buildExbar(el, n, body); el.appendChild(xb); }
-    bindExpandedDrag(el, [grip, xb]);
+    bindExpandedDrag(el, [grip, xb, nhead]);
     el.appendChild(titlerow); el.appendChild(content); el.appendChild(filesWrap); if (isNote) el.appendChild(dictbar); el.appendChild(foot); el.appendChild(mp); el.appendChild(tp); el.appendChild(fileInput);
     renderFiles(el, n);
     if (n.type === 'task') renderNoteTasks(n, el); else if (n.type === 'cal') renderNoteRem(n, el);
@@ -1405,7 +1406,7 @@
     var rz = document.createElement('div'); rz.className = 'rz'; rz.title = 'Drag to resize'; enableResize(rz, el, n); el.appendChild(rz);
     el.appendChild(minBtn);
 
-    enableDrag(el, grip, n);
+    enableDrag(el, grip, n); enableDrag(el, nhead, n);
     // mini note: header reveals only when hovering the top zone (title and above); big view: anywhere
     el.addEventListener('pointermove', function (e) {
       var r = el.getBoundingClientRect();
@@ -1470,7 +1471,7 @@
       h.addEventListener('pointerdown', function (e) {
         if (document.documentElement.classList.contains('winmode')) return; // real window: titlebar drags
         if (!el.classList.contains('expanded') || e.button !== 0) return;
-        if (h.classList.contains('exbar') && !(e.target === h || (e.target.classList && e.target.classList.contains('exsep')))) return;
+        if (e.target.closest && e.target.closest('button, input')) return; // controls stay clickable
         var r = el.getBoundingClientRect();
         el.classList.add('exmoved');
         el.style.setProperty('--exl', r.left + 'px'); el.style.setProperty('--ext', r.top + 'px');
@@ -2130,14 +2131,14 @@
     var w = window.innerWidth, h = window.innerHeight, now = Date.now();
     var seeds = [
       { fill: { kind: 'preset', id: 'yellow' }, font: 'system', title: 'Welcome to Desk Notes 👋',
-        text: '• Double-tap me to open the big editor\n• Hover me — a header appears up top\n• Tap the ○ circle for colors, fonts + options\n• Tap the ☰ lines to switch Note · Task · Calendar\n• Tap the 🎙 mic and speak — words appear at your cursor\n• Drag my header to move me — I snap to edges', dx: -330, dy: -110, w: 306, h: 268, upd: now - 60000 },
+        text: '• Double-tap me to open the big editor\n• Hover me — a header appears up top\n• Tap the ○ circle for colors, fonts + options\n• Tap the ☰ lines to switch Note · Task · Calendar\n• Tap the 🎙 mic and speak — words appear at your cursor\n• Drag my header to move me — I snap to edges', dx: -330, dy: -110, w: 306, upd: now - 60000 },
       { type: 'task', fill: { kind: 'preset', id: 'paper' }, font: 'system', title: 'Try a task list ✓',
         tasks: [
           { text: 'Check me off', done: false },
           { text: 'Press Enter to add another task', done: false },
           { text: 'Try ☰ → Calendar for reminders', done: false },
           { text: 'Delete me when you’re done', done: true }
-        ], dx: 30, dy: -80, w: 258, upd: now - 30000 }
+        ], dx: 30, dy: -80, upd: now - 30000 }
     ];
     seeds.forEach(function (s, si) {
       notes.push({ id: 'n' + now + si + (s.fill.id || ''),
