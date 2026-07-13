@@ -48,6 +48,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 @property (assign) BOOL floatOnTop;
 @property (assign) BOOL editorOpen;
 @property (strong) NSWindow *editorWindow; // real app window for the expanded editor (Stage Manager stages it)
+@property (strong) NSWindow *panelWindow;  // separate Settings/History window (desktop notes stay visible)
+@property (strong) WKWebView *panelWebView;
 // local Whisper dictation
 @property (strong) AVAudioEngine *engine;
 @property (strong) AVAudioConverter *conv;
@@ -220,6 +222,21 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         else if ([cmd isEqualToString:@"stop"]) [self stopDictationAndFinalize];
         return;
     }
+    if ([message.name isEqualToString:@"panel"]) {
+        NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
+        NSString *cmd = b[@"cmd"];
+        if ([cmd isEqualToString:@"close"]) { [self.panelWindow orderOut:nil]; }
+        else if ([cmd isEqualToString:@"changed"]) { // settings edited storage -> desktop view refreshes
+            [self.webView evaluateJavaScript:@"window.__reloadNotes&&window.__reloadNotes();" completionHandler:nil];
+        } else if ([cmd isEqualToString:@"openNote"]) {
+            [self.panelWindow orderOut:nil];
+            NSString *nid = [b[@"id"] isKindOfClass:[NSString class]] ? b[@"id"] : @"";
+            [self.webView evaluateJavaScript:
+                [NSString stringWithFormat:@"window.__expandNoteById&&window.__expandNoteById(%@);", JSStr(nid)]
+                               completionHandler:nil];
+        }
+        return;
+    }
     if ([message.name isEqualToString:@"notify"]) {
         NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
         [self deliverNotification:(b[@"title"] ?: @"Reminder") body:(b[@"body"] ?: @"")];
@@ -298,11 +315,18 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         [self.webView evaluateJavaScript:@"window.__closeExpand&&window.__closeExpand();" completionHandler:nil];
         return NO;
     }
+    if (sender == self.panelWindow) { [self.panelWindow orderOut:nil]; return NO; }
     return YES;
 }
 
 // inject native mode + rect reporting once the page loads
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (webView == self.panelWebView) { // settings window shows just the History panel
+        [webView evaluateJavaScript:
+            @"document.documentElement.classList.add('panelmode');"
+            @"window.__openHistory&&window.__openHistory(true);" completionHandler:nil];
+        return;
+    }
     NSString *js =
     @"document.documentElement.classList.add('native');"
     @"if(!window.__hitTimer){window.__hitTimer=setInterval(function(){"
@@ -326,10 +350,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [menu removeAllItems];
     NSMenuItem *add = [menu addItemWithTitle:@"New Note" action:@selector(newNote) keyEquivalent:@"n"];
     add.target = self;
-    NSMenuItem *srch = [menu addItemWithTitle:@"Search Notes…" action:@selector(openSearch) keyEquivalent:@"f"];
-    srch.target = self;
-    NSMenuItem *hist = [menu addItemWithTitle:@"History…" action:@selector(openHistory) keyEquivalent:@""];
-    hist.target = self;
+    NSMenuItem *settings = [menu addItemWithTitle:@"Settings…" action:@selector(openSettingsPanel) keyEquivalent:@","];
+    settings.target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *toggle = [menu addItemWithTitle:(self.hiddenAll ? @"Show Notes" : @"Hide Notes")
                                          action:@selector(toggleAll) keyEquivalent:@""];
@@ -440,16 +462,39 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[self backupDir]]];
 }
 
-/* ---------- search & history (open in the app window) ---------- */
+/* ---------- Settings window (own webview — desktop notes stay on screen) ---------- */
 
-- (void)openSearch {
-    if (self.hiddenAll) [self toggleAll];
-    [self.webView evaluateJavaScript:@"window.__openHistory&&window.__openHistory(true);" completionHandler:nil];
-}
-
-- (void)openHistory {
-    if (self.hiddenAll) [self toggleAll];
-    [self.webView evaluateJavaScript:@"window.__openHistory&&window.__openHistory(false);" completionHandler:nil];
+- (void)openSettingsPanel {
+    if (!self.panelWebView) {
+        WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+        cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore]; // same storage as the desktop view
+        [cfg.userContentController addScriptMessageHandler:self name:@"panel"];
+        self.panelWebView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:cfg];
+        self.panelWebView.navigationDelegate = self;
+        self.panelWebView.UIDelegate = self;
+        if (@available(macOS 13.3, *)) { self.panelWebView.inspectable = YES; }
+        NSURL *url = [[NSBundle mainBundle] URLForResource:@"index" withExtension:@"html"];
+        if (url) [self.panelWebView loadFileURL:url allowingReadAccessToURL:url.URLByDeletingLastPathComponent];
+    }
+    if (!self.panelWindow) {
+        self.panelWindow = [[NSWindow alloc]
+            initWithContentRect:NSMakeRect(0, 0, 700, 620)
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                        backing:NSBackingStoreBuffered defer:NO];
+        self.panelWindow.title = @"Desk Notes";
+        self.panelWindow.releasedWhenClosed = NO;
+        self.panelWindow.minSize = NSMakeSize(520, 400);
+        self.panelWindow.delegate = self;
+        [self.panelWindow center];
+        [self.panelWindow setFrameAutosaveName:@"DeskNotesPanel"];
+        self.panelWindow.contentView = self.panelWebView;
+    } else {
+        // refresh contents each open (picks up desktop-side changes)
+        [self.panelWebView evaluateJavaScript:@"window.__reloadNotes&&window.__reloadNotes();window.__openHistory&&window.__openHistory(true);" completionHandler:nil];
+    }
+    [self.panelWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 }
 
 /* ---------- check for updates ---------- */

@@ -539,6 +539,10 @@
   html.native #histover { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; padding: 0; }
   html.winmode #histover .histpanel { width: 100%; height: 100%; border-radius: 0; border: none; box-shadow: none; }
   html.winmode #histover .histhead { padding-top: 30px; } /* clear the titlebar drag zone */
+  /* settings window: this webview shows ONLY the history panel, full-bleed */
+  html.panelmode #desk, html.panelmode #bar, html.panelmode #hint { display: none; }
+  html.panelmode #histover { display: flex; padding: 0; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  html.panelmode .histpanel { width: 100%; height: 100%; border-radius: 0; border: none; box-shadow: none; }
 
   @media (prefers-reduced-motion: reduce) {
     .note, .note.lift, .note.leaving, .note.sizing { transition: box-shadow .2s ease; }
@@ -692,6 +696,7 @@
 
   var __bkT = null;
   function scheduleBackup() { // mirror notes to a real file via the Mac shell (debounced)
+    if (document.documentElement.classList.contains('panelmode')) return; // main view owns backups
     try { if (!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.backup)) return; } catch (e) { return; }
     clearTimeout(__bkT);
     __bkT = setTimeout(function () {
@@ -2205,6 +2210,7 @@
       }
       if (r.live) {
         actBtn('Open', '', function () {
+          if (isPanel()) { postPanel({ cmd: 'openNote', id: n.id }); return; }
           closeHistory();
           var el = desk.querySelector('.note[data-id="' + n.id + '"]');
           if (el) setTimeout(function () { openExpand(el, n); }, 60);
@@ -2215,28 +2221,47 @@
           n.deletedAt = undefined; n.z = ++zTop;
           n.x = Math.max(20, window.innerWidth / 2 - 125); n.y = Math.max(76, window.innerHeight / 2 - 115);
           notes.push(n); save(); renderAll(); renderHistoryList(); toast('Note restored');
+          postPanel({ cmd: 'changed' });
         });
         actBtn('Delete Forever', 'danger', function () {
           archive.splice(r.ai, 1); saveArch(); renderHistoryList(); toast('Deleted forever');
+          postPanel({ cmd: 'changed' });
         });
       }
       row.appendChild(chip); row.appendChild(mid); row.appendChild(acts);
       histList.appendChild(row);
     });
   }
+  function isPanel() { return document.documentElement.classList.contains('panelmode'); }
+  function postPanel(msg) { try { window.webkit.messageHandlers.panel.postMessage(msg); } catch (e) {} }
   function openHistory(focusSearch) {
     if (!histover) buildHistory();
     closeMenu(); closeType();
-    if (expandedNote) closeExpand();
+    if (!isPanel() && expandedNote) closeExpand();
     histover.classList.add('open');
     histInput.value = ''; renderHistoryList();
     if (focusSearch) setTimeout(function () { histInput.focus(); }, 120);
   }
-  function closeHistory() { if (histover) histover.classList.remove('open'); }
+  function closeHistory() {
+    if (isPanel()) { postPanel({ cmd: 'close' }); return; } // settings window: hide the window, stay ready
+    if (histover) histover.classList.remove('open');
+  }
   window.__openHistory = openHistory;
+  // settings window edited storage -> desktop view re-reads and re-renders
+  window.__reloadNotes = function () {
+    loadArch();
+    try { var r = localStorage.getItem(STORE); if (r) notes = JSON.parse(r); } catch (e) {}
+    notes.forEach(function (n) { normFill(n); if (n.z && n.z > zTop) zTop = n.z; });
+    renderAll();
+  };
+  window.__expandNoteById = function (id) {
+    var n = noteById(id); var el = desk.querySelector('.note[data-id="' + id + '"]');
+    if (n && el && !expandedNote) openExpand(el, n);
+  };
 
   // reminders fire real notifications when due (checked every 30s)
   function checkReminders() {
+    if (document.documentElement.classList.contains('panelmode')) return; // settings window doesn't fire reminders
     var now = new Date();
     var today = ymd2(now);
     var hm = pad2(now.getHours()) + ':' + pad2(now.getMinutes());
