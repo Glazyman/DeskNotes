@@ -645,7 +645,15 @@
     n.html = src.innerHTML; n.text = src.textContent;
   }
 
-  function save() { try { localStorage.setItem(STORE, JSON.stringify(notes)); } catch (e) {} }
+  var __bkT = null;
+  function scheduleBackup() { // mirror notes to a real file via the Mac shell (debounced)
+    try { if (!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.backup)) return; } catch (e) { return; }
+    clearTimeout(__bkT);
+    __bkT = setTimeout(function () {
+      try { window.webkit.messageHandlers.backup.postMessage(localStorage.getItem(STORE) || '[]'); } catch (e) {}
+    }, 4000);
+  }
+  function save() { try { localStorage.setItem(STORE, JSON.stringify(notes)); scheduleBackup(); } catch (e) {} }
   function load() { try { var r = localStorage.getItem(STORE); if (r) return JSON.parse(r); } catch (e) {} return null; }
 
   /* ---------- theme ---------- */
@@ -1345,7 +1353,9 @@
       if (el.classList.contains('expanded')) { el.classList.add('hov'); return; }
       var r = el.getBoundingClientRect();
       var tb = titlerow.getBoundingClientRect();
-      var limit = Math.max(r.top + 46, tb.height > 0 ? tb.bottom : 0);
+      var on = el.classList.contains('hov');
+      // hysteresis: once open, the zone grows by the header's height so it can't flicker on/off
+      var limit = Math.max(r.top + 46, tb.height > 0 ? tb.bottom : 0) + (on ? 36 : 0);
       el.classList.toggle('hov', e.clientY <= limit);
     });
     el.addEventListener('pointerleave', function () { el.classList.remove('hov'); });
@@ -2069,6 +2079,39 @@
     renderAll(); save();
   }
   window.__addTutorial = spawnTutorialNotes; // native menu hook
+
+  // menu-bar search: filter desktop notes live while typing
+  window.__searchNotes = function (q) {
+    q = (q || '').trim().toLowerCase();
+    notes.forEach(function (n) {
+      var el = desk.querySelector('.note[data-id="' + n.id + '"]'); if (!el) return;
+      var hay = ((n.title || '') + ' ' + (n.text || '') + ' ' +
+        (n.tasks || []).map(function (t) { return t.text; }).join(' ') + ' ' +
+        (n.reminders || []).map(function (r) { return r.text; }).join(' ')).toLowerCase();
+      el.style.display = (!q || hay.indexOf(q) >= 0) ? '' : 'none';
+    });
+  };
+
+  // reminders fire real notifications when due (checked every 30s)
+  function checkReminders() {
+    var now = new Date();
+    var today = ymd2(now);
+    var hm = pad2(now.getHours()) + ':' + pad2(now.getMinutes());
+    var dirty = false;
+    notes.forEach(function (n) {
+      (n.reminders || []).forEach(function (r) {
+        if (r.fired || !r.time || r.date !== today || r.time > hm) return;
+        r.fired = true; dirty = true;
+        var title = (n.title || '').trim() || 'Reminder';
+        try { window.webkit.messageHandlers.notify.postMessage({ title: title, body: r.text }); }
+        catch (e) { toast('⏰ ' + r.text); }
+      });
+    });
+    if (dirty) save();
+  }
+  setInterval(checkReminders, 30000);
+  setTimeout(checkReminders, 4000);
+  scheduleBackup(); // ensure the backup file exists from first launch
 
   var saved = load();
   if (saved && saved.length) {

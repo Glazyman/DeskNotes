@@ -5,6 +5,7 @@
 #import <WebKit/WebKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <UserNotifications/UserNotifications.h>
 #import "whisper.h"
 
 static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
@@ -38,7 +39,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSMenuDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSMenuDelegate, UNUserNotificationCenterDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) OverlayWindow *window;
 @property (strong) WKWebView *webView;
@@ -99,6 +100,9 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
     [config.userContentController addScriptMessageHandler:self name:@"hit"];
     [config.userContentController addScriptMessageHandler:self name:@"dict"];
+    [config.userContentController addScriptMessageHandler:self name:@"notify"];
+    [config.userContentController addScriptMessageHandler:self name:@"backup"];
+    [UNUserNotificationCenter currentNotificationCenter].delegate = self;
     self.dictQ = dispatch_queue_create("desknotes.whisper", DISPATCH_QUEUE_SERIAL);
     self.pcm = [NSMutableData data];
     self.webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:config];
@@ -110,9 +114,9 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     NSURL *url = [[NSBundle mainBundle] URLForResource:@"index" withExtension:@"html"];
     if (url) [self.webView loadFileURL:url allowingReadAccessToURL:[url URLByDeletingLastPathComponent]];
 
-    // full-screen transparent overlay
-    NSScreen *screen = [NSScreen mainScreen];
-    self.window = [[OverlayWindow alloc] initWithContentRect:screen.frame
+    // transparent overlay spanning EVERY connected display
+    NSRect union_ = [self allScreensFrame];
+    self.window = [[OverlayWindow alloc] initWithContentRect:union_
                                                    styleMask:NSWindowStyleMaskBorderless
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
@@ -127,8 +131,14 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     self.window.ignoresMouseEvents = YES; // click-through until the cursor is over a note
     self.window.releasedWhenClosed = NO;
     self.window.contentView = self.webView;
-    [self.window setFrame:screen.frame display:YES];
+    [self.window setFrame:union_ display:YES];
     [self.window orderFrontRegardless];
+
+    // monitors plugged/unplugged -> re-span the overlay
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidChangeScreenParametersNotification
+        object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        [self.window setFrame:[self allScreensFrame] display:YES];
+    }];
 
     __weak typeof(self) weakSelf = self;
 
@@ -208,6 +218,15 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         NSString *cmd = b[@"cmd"];
         if ([cmd isEqualToString:@"start"]) [self startDictation];
         else if ([cmd isEqualToString:@"stop"]) [self stopDictationAndFinalize];
+        return;
+    }
+    if ([message.name isEqualToString:@"notify"]) {
+        NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
+        [self deliverNotification:(b[@"title"] ?: @"Reminder") body:(b[@"body"] ?: @"")];
+        return;
+    }
+    if ([message.name isEqualToString:@"backup"]) {
+        if ([message.body isKindOfClass:[NSString class]]) [self writeBackup:message.body];
         return;
     }
     if (![message.name isEqualToString:@"hit"]) return;
@@ -304,6 +323,17 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 // dropdown contents (rebuilt each time it opens)
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     [menu removeAllItems];
+    // live search across notes
+    NSMenuItem *searchItem = [[NSMenuItem alloc] init];
+    NSView *wrap = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 238, 30)];
+    NSSearchField *sf = [[NSSearchField alloc] initWithFrame:NSMakeRect(10, 3, 218, 24)];
+    sf.placeholderString = @"Search notes…";
+    sf.target = self; sf.action = @selector(searchChanged:);
+    [sf.cell setSendsSearchStringImmediately:YES];
+    [wrap addSubview:sf];
+    searchItem.view = wrap;
+    [menu addItem:searchItem];
+    [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *add = [menu addItemWithTitle:@"New Note" action:@selector(newNote) keyEquivalent:@"n"];
     add.target = self;
     [menu addItem:[NSMenuItem separatorItem]];
@@ -321,6 +351,10 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
                         ? NSControlStateValueOn : NSControlStateValueOff;
         login.target = self;
     }
+    NSMenuItem *bk = [menu addItemWithTitle:@"Open Backup Folder" action:@selector(openBackupFolder) keyEquivalent:@""];
+    bk.target = self;
+    NSMenuItem *upd = [menu addItemWithTitle:@"Check for Updates…" action:@selector(checkForUpdates) keyEquivalent:@""];
+    upd.target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [menu addItemWithTitle:@"Quit Desk Notes" action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
@@ -363,6 +397,107 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     } else {
         [self.window orderFrontRegardless];
     }
+}
+
+- (NSRect)allScreensFrame {
+    NSRect u = NSZeroRect;
+    for (NSScreen *s in NSScreen.screens) u = NSUnionRect(u, s.frame);
+    return NSIsEmptyRect(u) ? NSScreen.mainScreen.frame : u;
+}
+
+/* ---------- reminder notifications ---------- */
+
+- (void)deliverNotification:(NSString *)title body:(NSString *)body {
+    UNUserNotificationCenter *c = [UNUserNotificationCenter currentNotificationCenter];
+    [c requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                     completionHandler:^(BOOL granted, NSError *err) {
+        if (!granted) return;
+        UNMutableNotificationContent *content = [UNMutableNotificationContent new];
+        content.title = title;
+        content.body = body;
+        content.sound = [UNNotificationSound defaultSound];
+        UNNotificationRequest *req = [UNNotificationRequest requestWithIdentifier:[NSUUID UUID].UUIDString
+                                                                          content:content trigger:nil];
+        [c addNotificationRequest:req withCompletionHandler:nil];
+    }];
+}
+
+// show banners even while Desk Notes is the active app
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+}
+
+/* ---------- backup ---------- */
+
+- (NSString *)backupDir {
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Desk Notes"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
+- (void)writeBackup:(NSString *)json {
+    NSString *path = [[self backupDir] stringByAppendingPathComponent:@"notes-backup.json"];
+    [json writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (void)openBackupFolder {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[self backupDir]]];
+}
+
+/* ---------- search (menu bar) ---------- */
+
+- (void)searchChanged:(NSSearchField *)sf {
+    [self.webView evaluateJavaScript:
+        [NSString stringWithFormat:@"window.__searchNotes&&window.__searchNotes(%@);", JSStr(sf.stringValue)]
+                   completionHandler:nil];
+}
+
+- (void)menuDidClose:(NSMenu *)menu { // menu closed -> clear the filter
+    [self.webView evaluateJavaScript:@"window.__searchNotes&&window.__searchNotes('');" completionHandler:nil];
+}
+
+/* ---------- check for updates ---------- */
+
+- (void)checkForUpdates {
+    NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0";
+    NSURL *u = [NSURL URLWithString:@"https://api.github.com/repos/Glazyman/DeskNotes/releases/latest"];
+    [[[NSURLSession sharedSession] dataTaskWithURL:u completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSString *latest = nil;
+        if (d) {
+            NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+            latest = [j[@"tag_name"] isKindOfClass:[NSString class]] ? j[@"tag_name"] : nil;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSAlert *a = [[NSAlert alloc] init];
+            if (!latest) {
+                a.messageText = @"Couldn’t check for updates";
+                a.informativeText = @"Check your internet connection and try again.";
+                [a addButtonWithTitle:@"OK"];
+                [NSApp activateIgnoringOtherApps:YES]; [a runModal]; return;
+            }
+            NSString *latestV = [latest hasPrefix:@"v"] ? [latest substringFromIndex:1] : latest;
+            if ([latestV compare:cur options:NSNumericSearch] == NSOrderedDescending) {
+                a.messageText = [NSString stringWithFormat:@"Desk Notes %@ is available", latestV];
+                a.informativeText = [NSString stringWithFormat:@"You have %@. Update now? The app will restart.", cur];
+                [a addButtonWithTitle:@"Update Now"];
+                [a addButtonWithTitle:@"Later"];
+                [NSApp activateIgnoringOtherApps:YES];
+                if ([a runModal] == NSAlertFirstButtonReturn) {
+                    NSTask *t = [[NSTask alloc] init];
+                    t.launchPath = @"/bin/bash";
+                    t.arguments = @[@"-c", @"sleep 1; curl -fsSL https://raw.githubusercontent.com/Glazyman/DeskNotes/master/install.sh | bash"];
+                    [t launch];
+                }
+            } else {
+                a.messageText = @"You’re up to date";
+                a.informativeText = [NSString stringWithFormat:@"Desk Notes %@ is the latest version.", cur];
+                [a addButtonWithTitle:@"OK"];
+                [NSApp activateIgnoringOtherApps:YES]; [a runModal];
+            }
+        });
+    }] resume];
 }
 
 /* ---------- local Whisper dictation ---------- */
