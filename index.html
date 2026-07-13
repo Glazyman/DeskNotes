@@ -221,7 +221,7 @@
     display: flex; align-items: center; height: 0; opacity: 0; overflow: hidden;
     transition: height .16s ease, opacity .13s ease; position: relative; z-index: 5;
   }
-  .note.hov .nhead, .note.expanded:hover .nhead, .note.editing .nhead,
+  .note.hov .nhead, .note.editing .nhead,
   .note.menu-open .nhead, .note.type-open .nhead, .note.recording .nhead { height: 28px; opacity: 1; }
   .note .tools { display: flex; gap: 2px; }
   .tool {
@@ -1408,10 +1408,13 @@
     enableDrag(el, grip, n);
     // mini note: header reveals only when hovering the top zone (title and above); big view: anywhere
     el.addEventListener('pointermove', function (e) {
-      if (el.classList.contains('expanded')) { el.classList.add('hov'); return; }
       var r = el.getBoundingClientRect();
-      var tb = titlerow.getBoundingClientRect();
       var on = el.classList.contains('hov');
+      if (el.classList.contains('expanded')) { // big view: header reveals near the top only
+        el.classList.toggle('hov', e.clientY <= r.top + 52 + (on ? 36 : 0));
+        return;
+      }
+      var tb = titlerow.getBoundingClientRect();
       // hysteresis: once open, the zone grows by the header's height so it can't flicker on/off
       var limit = Math.max(r.top + 46, tb.height > 0 ? tb.bottom : 0) + (on ? 36 : 0);
       el.classList.toggle('hov', e.clientY <= limit);
