@@ -47,6 +47,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 @property (strong) NSArray<NSValue *> *hitRects; // note rects in view coords
 @property (assign) BOOL hiddenAll;
 @property (assign) BOOL floatOnTop;
+@property (assign) BOOL tempFloat; // new note floats above apps until the user clicks away
 @property (assign) BOOL editorOpen;
 @property (strong) NSWindow *editorWindow; // real app window for the expanded editor (Stage Manager stages it)
 @property (strong) NSWindow *panelWindow;  // separate Settings/History window (desktop notes stay visible)
@@ -129,8 +130,11 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     self.window.hasShadow = NO;
     self.floatOnTop = NO;
     self.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1; // lives ON the desktop, under app windows
-    // stays on the desktop/Space it launched on (the home screen) — does not follow Space switches
-    self.window.collectionBehavior = NSWindowCollectionBehaviorStationary |
+    // visible on every Space of its display (a Space switch must never strand the notes),
+    // and allowed to appear over full-screen apps while temporarily floating
+    self.window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                     NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                     NSWindowCollectionBehaviorStationary |
                                      NSWindowCollectionBehaviorIgnoresCycle;
     self.window.ignoresMouseEvents = YES; // click-through until the cursor is over a note
     self.window.releasedWhenClosed = NO;
@@ -184,6 +188,10 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
 // user switched to another app / clicked the desktop: end any in-note editing so controls hide
 - (void)applicationDidResignActive:(NSNotification *)notification {
+    if (self.tempFloat) { // a freshly created note settles back onto the desktop
+        self.tempFloat = NO;
+        if (!self.floatOnTop) self.window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
+    }
     [self.webView evaluateJavaScript:
         @"try{if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();"
         @"var s=window.getSelection&&window.getSelection();if(s&&s.removeAllRanges)s.removeAllRanges();}catch(e){}"
@@ -308,6 +316,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     self.window.contentView = self.webView;            // page returns to the desktop overlay
     [self.editorWindow orderOut:nil];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory]; // back to menu-bar-only
+    self.tempFloat = NO;
     self.window.level = self.floatOnTop ? NSFloatingWindowLevel
                                         : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
     [self.window orderFrontRegardless];
@@ -393,13 +402,35 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     }
 }
 
+// the notes board lives on ONE screen (separate Spaces forbids spanning) — summon it to the
+// screen whose menu bar the user clicked, and remember that screen for the next launch
+- (void)retargetOverlay {
+    if (!NSScreen.screensHaveSeparateSpaces) return; // spanning window already covers everything
+    NSPoint m = [NSEvent mouseLocation];
+    NSScreen *target = nil;
+    for (NSScreen *s in NSScreen.screens) if (NSMouseInRect(m, s.frame, NO)) { target = s; break; }
+    if (!target) return;
+    [[NSUserDefaults standardUserDefaults] setObject:NSStringFromPoint(target.frame.origin)
+                                              forKey:@"OverlayScreenOrigin"];
+    if (NSEqualRects(self.window.frame, target.frame)) return;
+    [self.window setFrame:target.frame display:YES];
+    [self pushTopInset];
+    [self.webView evaluateJavaScript:@"window.__clampAll&&window.__clampAll();" completionHandler:nil];
+}
+
 - (void)showTutorial {
     if (self.hiddenAll) [self toggleAll];
+    [self retargetOverlay];
     [self.webView evaluateJavaScript:@"window.__addTutorial&&window.__addTutorial();" completionHandler:nil];
 }
 
 - (void)newNote {
     if (self.hiddenAll) [self toggleAll];
+    [self retargetOverlay];
+    if (!self.floatOnTop) { // surface the new note even over full-screen apps; sinks on click-away
+        self.tempFloat = YES;
+        self.window.level = NSFloatingWindowLevel;
+    }
     [self.window orderFrontRegardless];
     [NSApp activateIgnoringOtherApps:YES];
     [self.window makeKeyWindow];
@@ -408,6 +439,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
 - (void)togglePin {
     self.floatOnTop = !self.floatOnTop;
+    self.tempFloat = NO;
     self.window.level = self.floatOnTop ? NSFloatingWindowLevel
                                         : CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + 1;
 }
@@ -418,6 +450,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         [self.window orderOut:nil];
         self.window.ignoresMouseEvents = YES;
     } else {
+        [self retargetOverlay];
         [self.window orderFrontRegardless];
     }
 }
@@ -430,20 +463,24 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
 // "Displays have separate Spaces" (the default) clips any window to a single display,
 // so a union-of-screens overlay renders on only one screen and everything else vanishes.
-// In that mode the overlay lives on the primary display (the one with the menu bar).
+// In that mode the overlay lives on the screen the user last summoned notes to.
 - (NSRect)overlayFrame {
-    if (NSScreen.screensHaveSeparateSpaces) {
-        NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
-        return primary.frame;
+    if (!NSScreen.screensHaveSeparateSpaces) return [self allScreensFrame];
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"OverlayScreenOrigin"];
+    if (saved) {
+        NSPoint o = NSPointFromString(saved);
+        for (NSScreen *s in NSScreen.screens)
+            if (NSEqualPoints(s.frame.origin, o)) return s.frame;
     }
-    return [self allScreensFrame];
+    NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
+    return primary.frame;
 }
 
 // tell the page where the menu bar ends, so notes can rise exactly as high as Apple's widgets
 - (void)pushTopInset {
-    NSScreen *primary = NSScreen.screens.firstObject ?: NSScreen.mainScreen;
+    NSScreen *s = self.window.screen ?: (NSScreen.screens.firstObject ?: NSScreen.mainScreen);
     NSRect f = self.window.frame;
-    CGFloat inset = (NSMaxY(f) - NSMaxY(primary.visibleFrame)) + 12;
+    CGFloat inset = (NSMaxY(f) - NSMaxY(s.visibleFrame)) + 12;
     [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__topInset=%.0f;", inset]
                    completionHandler:nil];
 }
