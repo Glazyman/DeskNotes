@@ -1456,6 +1456,7 @@
     setTimeout(function () { el.querySelector('.title').focus(); }, 60);
   }
   function removeNote(n, el) {
+    if (expandedNote === el) closeExpand(); // deleting from the big view closes the window too
     if (openMenuEl === el) openMenuEl = null;
     if (activeRec && activeRec.el === el) stopDictation();
     el.classList.add('leaving');
