@@ -28,6 +28,7 @@ echo "→ bundling resources…"
 cp Info.plist "$APP/Contents/Info.plist"
 cp index.html "$APP/Contents/Resources/index.html"
 cp ggml-base.en.bin "$APP/Contents/Resources/ggml-base.en.bin"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 echo "→ signing (ad-hoc, local use)…"
 codesign --force -s - "$APP"

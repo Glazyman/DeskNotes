@@ -86,7 +86,9 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
     // status bar item — click opens the dropdown
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
-    self.statusItem.button.title = @"🗒️";
+    NSImage *sicon = [NSImage imageWithSystemSymbolName:@"square.and.pencil" accessibilityDescription:@"Desk Notes"];
+    if (sicon) { sicon.template = YES; self.statusItem.button.image = sicon; }
+    else { self.statusItem.button.title = @"✎"; }
     NSMenu *menu = [[NSMenu alloc] init];
     menu.delegate = self;
     self.statusItem.menu = menu;
