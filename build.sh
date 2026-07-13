@@ -19,7 +19,7 @@ clang -fobjc-arc -O2 main.m \
   "$W/build/ggml/src/libggml-cpu.a" \
   "$W/build/ggml/src/ggml-blas/libggml-blas.a" \
   "$W/build/ggml/src/ggml-metal/libggml-metal.a" \
-  -framework Cocoa -framework WebKit -framework AVFoundation \
+  -framework Cocoa -framework WebKit -framework AVFoundation -framework ServiceManagement \
   -framework Accelerate -framework Metal -framework MetalKit -framework Foundation \
   -lc++ \
   -o "$APP/Contents/MacOS/DeskNotes"

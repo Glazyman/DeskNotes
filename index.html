@@ -221,7 +221,7 @@
     display: flex; align-items: center; height: 0; opacity: 0; overflow: hidden;
     transition: height .16s ease, opacity .13s ease; position: relative; z-index: 5;
   }
-  .note:hover .nhead, .note.hov .nhead, .note.editing .nhead,
+  .note.hov .nhead, .note.expanded:hover .nhead, .note.editing .nhead,
   .note.menu-open .nhead, .note.type-open .nhead, .note.recording .nhead { height: 28px; opacity: 1; }
   .note .tools { display: flex; gap: 2px; }
   .tool {
@@ -1340,7 +1340,14 @@
     el.appendChild(minBtn);
 
     enableDrag(el, grip, n);
-    el.addEventListener('pointerenter', function () { el.classList.add('hov'); });
+    // mini note: header reveals only when hovering the top zone (title and above); big view: anywhere
+    el.addEventListener('pointermove', function (e) {
+      if (el.classList.contains('expanded')) { el.classList.add('hov'); return; }
+      var r = el.getBoundingClientRect();
+      var tb = titlerow.getBoundingClientRect();
+      var limit = Math.max(r.top + 46, tb.height > 0 ? tb.bottom : 0);
+      el.classList.toggle('hov', e.clientY <= limit);
+    });
     el.addEventListener('pointerleave', function () { el.classList.remove('hov'); });
     el.addEventListener('pointerdown', function () { if (!el.classList.contains('expanded')) { n.z = ++zTop; el.style.zIndex = n.z; save(); } });
     el.addEventListener('dblclick', function (e) {

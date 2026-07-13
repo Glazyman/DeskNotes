@@ -4,6 +4,7 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <ServiceManagement/ServiceManagement.h>
 #import "whisper.h"
 
 static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
@@ -314,9 +315,25 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     pin.target = self;
     NSMenuItem *tut = [menu addItemWithTitle:@"Show Tutorial Notes" action:@selector(showTutorial) keyEquivalent:@""];
     tut.target = self;
+    if (@available(macOS 13.0, *)) {
+        NSMenuItem *login = [menu addItemWithTitle:@"Launch at Login" action:@selector(toggleLaunchAtLogin) keyEquivalent:@""];
+        login.state = (SMAppService.mainAppService.status == SMAppServiceStatusEnabled)
+                        ? NSControlStateValueOn : NSControlStateValueOff;
+        login.target = self;
+    }
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [menu addItemWithTitle:@"Quit Desk Notes" action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
+}
+
+- (void)toggleLaunchAtLogin {
+    if (@available(macOS 13.0, *)) {
+        NSError *err = nil;
+        SMAppService *svc = SMAppService.mainAppService;
+        if (svc.status == SMAppServiceStatusEnabled) [svc unregisterAndReturnError:&err];
+        else [svc registerAndReturnError:&err];
+        if (err) NSLog(@"launch-at-login toggle failed: %@", err);
+    }
 }
 
 - (void)showTutorial {
