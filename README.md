@@ -15,7 +15,15 @@ Notes sit on your desktop like widgets (under your app windows), a menu-bar icon
 - **Attachments** — images (auto-compressed) and files, via picker, drag-drop, or paste
 - Colors, gradients, custom colors, per-view sizes, edge snapping, and more
 
-## Install (download)
+## Install (one line)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Glazyman/DeskNotes/master/install.sh | bash
+```
+
+Downloads the latest release into /Applications and launches it. Done — look for 🗒️ in your menu bar.
+
+## Install (manual download)
 
 1. Grab **Desk-Notes.zip** from the [latest release](../../releases/latest) and unzip it.
 2. Drag **Desk Notes.app** into **Applications**.
