@@ -570,6 +570,7 @@
   var hint = document.getElementById('hint');
   var countEl = document.getElementById('count');
   var STORE = 'notes.app.v5';
+  function __top() { return (window.__topInset || 58); } // notes may rise to just under the menu bar
 
   var SOLIDS = [
     { id: 'paper',  l: '#FFFFFF', d: '#1C1C1F' },
@@ -1452,7 +1453,7 @@
   function snapPos(n, nx, ny, el) {
     var w = el.offsetWidth, h = el.offsetHeight, T = 12, G = 16;
     var xs = [G, window.innerWidth - w - G];
-    var ys = [66, window.innerHeight - h - G];
+    var ys = [__top(), window.innerHeight - h - G];
     notes.forEach(function (o) {
       if (o.id === n.id) return;
       var oel = desk.querySelector('.note[data-id="' + o.id + '"]'); if (!oel) return;
@@ -1497,7 +1498,7 @@
     handle.addEventListener('pointermove', function (e) {
       if (!dragging) return;
       var nx = Math.max(-50, Math.min(window.innerWidth - 60, ox + (e.clientX - sx)));
-      var ny = Math.max(58, Math.min(window.innerHeight - 60, oy + (e.clientY - sy)));
+      var ny = Math.max(__top(), Math.min(window.innerHeight - 60, oy + (e.clientY - sy)));
       var sp = snapPos(n, nx, ny, el); nx = sp[0]; ny = sp[1];
       n.x = nx; n.y = ny; el.style.left = nx + 'px'; el.style.top = ny + 'px';
     });
@@ -1522,6 +1523,7 @@
     function end() {
       if (!sizing) return; sizing = false; el.classList.remove('sizing');
       n.sizes = n.sizes || {}; n.sizes[n.type || 'note'] = { w: n.w || null, h: n.h || null }; // remember per view
+      clampToScreen(n, el);
       save();
     }
     handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
@@ -1674,10 +1676,22 @@
     } else { flashFoot(el, 'Sharing not supported here'); }
   }
 
+  // keep the note fully on screen after any size change, nudging position only as needed
+  function clampToScreen(n, el) {
+    var G = 12, w = el.offsetWidth, h = el.offsetHeight;
+    var nx = Math.min(Math.max(G, n.x), Math.max(G, window.innerWidth - w - G));
+    var ny = Math.min(Math.max(__top(), n.y), Math.max(__top(), window.innerHeight - h - G));
+    if (nx !== n.x || ny !== n.y) {
+      n.x = nx; n.y = ny;
+      el.style.left = nx + 'px'; el.style.top = ny + 'px';
+      save();
+    }
+  }
   function fitNote(el, n) {
     el.style.height = 'auto';
     var h = Math.min(760, Math.max(180, el.scrollHeight + 2));
     n.h = Math.round(h); el.style.height = n.h + 'px'; touch(n); save();
+    if (!el.classList.contains('expanded')) clampToScreen(n, el);
   }
   function resetSize(el, n) { n.w = null; n.h = null; el.style.width = ''; el.style.height = ''; touch(n); save(); }
 
@@ -1933,12 +1947,12 @@
 
   desk.addEventListener('dblclick', function (e) {
     if (e.target !== desk && !e.target.closest('#hint')) return;
-    addNote(e.clientX - 125, Math.max(66, e.clientY - 24));
+    addNote(e.clientX - 125, Math.max(__top(), e.clientY - 24));
   });
   document.getElementById('add').addEventListener('click', function () {
     var cx = window.innerWidth / 2 - 125 + (Math.random() * 70 - 35);
     var cy = window.innerHeight / 2 - 115 + (Math.random() * 50 - 25);
-    addNote(cx, Math.max(66, cy));
+    addNote(cx, Math.max(__top(), cy));
   });
 
   /* ---------- per-note types: Note / Task / Calendar ---------- */
@@ -1966,6 +1980,7 @@
     touch(n); save();
     if (parent) { if (next) parent.insertBefore(nu, next); else parent.appendChild(nu); }
     el.remove();
+    clampToScreen(n, nu); // restored size must never hang off the screen
     if (reopen) openExpand(nu, n);
   }
   function buildTaskBody(n, el) {
@@ -2142,7 +2157,7 @@
     ];
     seeds.forEach(function (s, si) {
       notes.push({ id: 'n' + now + si + (s.fill.id || ''),
-        x: Math.max(20, w / 2 + s.dx), y: Math.max(76, h / 2 + s.dy),
+        x: Math.max(20, w / 2 + s.dx), y: Math.max(__top() + 8, h / 2 + s.dy),
         fill: s.fill, font: s.font, title: s.title, text: s.text || '',
         type: s.type, w: s.w, h: s.h, updated: s.upd, z: ++zTop,
         tasks: s.tasks ? s.tasks.map(function (t, ti) { return { id: 't' + now + si + '_' + ti, text: t.text, done: !!t.done }; }) : undefined });
@@ -2223,7 +2238,7 @@
         actBtn('Restore', '', function () {
           archive.splice(r.ai, 1); saveArch();
           n.deletedAt = undefined; n.z = ++zTop;
-          n.x = Math.max(20, window.innerWidth / 2 - 125); n.y = Math.max(76, window.innerHeight / 2 - 115);
+          n.x = Math.max(20, window.innerWidth / 2 - 125); n.y = Math.max(__top() + 8, window.innerHeight / 2 - 115);
           notes.push(n); save(); renderAll(); renderHistoryList(); toast('Note restored');
           postPanel({ cmd: 'changed' });
         });
@@ -2303,7 +2318,7 @@
   // native shell hook: menu-bar "New Note"
   window.__addNote = function () {
     addNote(window.innerWidth / 2 - 125 + (Math.random() * 70 - 35),
-            Math.max(66, window.innerHeight / 2 - 115 + (Math.random() * 50 - 25)));
+            Math.max(__top(), window.innerHeight / 2 - 115 + (Math.random() * 50 - 25)));
   };
 
   syncTheme(); updateCount();

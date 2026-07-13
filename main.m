@@ -19,6 +19,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 @implementation OverlayWindow
 - (BOOL)canBecomeKeyWindow { return YES; }   // borderless windows refuse focus by default
 - (BOOL)canBecomeMainWindow { return YES; }
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen { return frameRect; } // cover the FULL screen, menu-bar zone included
 
 // Route ⌘-shortcuts straight to the focused note (menu routing is unreliable in borderless windows)
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
@@ -140,6 +141,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidChangeScreenParametersNotification
         object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         [self.window setFrame:[self allScreensFrame] display:YES];
+        [self pushTopInset];
     }];
 
     __weak typeof(self) weakSelf = self;
@@ -343,6 +345,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     @"  try{window.webkit.messageHandlers.hit.postMessage({r:rs,x:xo});}catch(e){}"
     @"},120);}";
     [webView evaluateJavaScript:js completionHandler:nil];
+    [self pushTopInset];
 }
 
 // dropdown contents (rebuilt each time it opens)
@@ -419,6 +422,16 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     NSRect u = NSZeroRect;
     for (NSScreen *s in NSScreen.screens) u = NSUnionRect(u, s.frame);
     return NSIsEmptyRect(u) ? NSScreen.mainScreen.frame : u;
+}
+
+// tell the page where the menu bar ends, so notes can rise exactly as high as Apple's widgets
+- (void)pushTopInset {
+    NSScreen *ms = [NSScreen mainScreen];
+    NSRect u = [self allScreensFrame];
+    CGFloat menuH = NSMaxY(ms.frame) - NSMaxY(ms.visibleFrame);
+    CGFloat inset = (NSMaxY(u) - NSMaxY(ms.frame)) + menuH + 12;
+    [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__topInset=%.0f;", inset]
+                   completionHandler:nil];
 }
 
 /* ---------- reminder notifications ---------- */
