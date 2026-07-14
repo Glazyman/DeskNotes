@@ -158,9 +158,67 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
                 [NSApp activateIgnoringOtherApps:YES];
                 [ov.window makeKeyWindow];
             }
+            [weakSelf closePopsAwayFromNotes];
         }
         return e;
     }];
+    // clicks that land outside the notes go to whatever is underneath (wallpaper, another app), so the
+    // page never sees them — watch globally and tell it to drop any open dropdown
+    [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^(NSEvent *e) {
+        // clicking the bare desktop while the editor is up means "put this away" — minimize on the
+        // mouse-DOWN, before macOS (Stage Manager) starts sliding the window off to its side strip.
+        // A click on another app's window is a real app switch, so it's left to macOS.
+        if (weakSelf.editorOverlay) {
+            if ([weakSelf clickAtMouseIsBareDesktop]) [weakSelf minimizeEditor];
+            return;
+        }
+        [weakSelf updateMousePassthrough];
+        [weakSelf closePopsAwayFromNotes];
+    }];
+}
+
+// Is the pointer over empty desktop — wallpaper, no app window? Walks the on-screen window list
+// (front to back, wallpaper excluded) and asks whether any ordinary window covers the point.
+- (BOOL)clickAtMouseIsBareDesktop {
+    NSScreen *first = NSScreen.screens.firstObject;
+    if (!first) return NO;
+    NSPoint m = [NSEvent mouseLocation];
+    CGPoint p = CGPointMake(m.x, NSMaxY(first.frame) - m.y); // CG measures down from the top
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return NO;
+    BOOL bare = YES;
+    pid_t me = getpid();
+    for (NSDictionary *w in (__bridge NSArray *)list) {
+        if ([w[(id)kCGWindowLayer] integerValue] != 0) continue;      // menu bar, dock, panels — not app windows
+        if ([w[(id)kCGWindowOwnerPID] intValue] == me) continue;      // our own windows don't count
+        CGRect r;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &r)) continue;
+        if (CGRectContainsPoint(r, p)) { bare = NO; break; }
+    }
+    CFRelease(list);
+    return bare;
+}
+
+// put the expanded editor away: un-expand in the page first (so it measures itself while still in the
+// editor window), then hand the page back to the desktop overlay
+- (void)minimizeEditor {
+    ScreenOverlay *ov = self.editorOverlay;
+    if (!ov) return;
+    __weak typeof(self) weakSelf = self;
+    [ov.webView evaluateJavaScript:@"window.__closeExpand&&window.__closeExpand();"
+                 completionHandler:^(id r, NSError *e) { [weakSelf closeEditorWindow]; }];
+}
+
+// close dropdowns on every display except the one whose note actually caught the click
+- (void)closePopsAwayFromNotes {
+    if (self.editorOverlay) return; // the editor window is a normal window; the page sees its own clicks
+    ScreenOverlay *hot = [self overlayUnderMouse];
+    if (hot && hot.window.ignoresMouseEvents) hot = nil; // click fell through: not on a note
+    for (ScreenOverlay *o in self.overlays) {
+        if (o == hot) continue;
+        [o.webView evaluateJavaScript:@"window.__closePops&&window.__closePops();" completionHandler:nil];
+    }
 }
 
 /* ---------- per-display overlays ---------- */
@@ -273,6 +331,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         [o.webView evaluateJavaScript:
             @"try{if(document.activeElement&&document.activeElement.blur)document.activeElement.blur();"
             @"var s=window.getSelection&&window.getSelection();if(s&&s.removeAllRanges)s.removeAllRanges();}catch(e){}"
+            @"window.__closePops&&window.__closePops();"
             @"(function(){var b=document.body;b.style.pointerEvents='none';setTimeout(function(){b.style.pointerEvents='';},30);})();"
                         completionHandler:nil];
 }

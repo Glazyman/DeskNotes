@@ -319,6 +319,17 @@
   .rz:hover { opacity: 1; }
   .rz::before { content: ""; position: absolute; right: 4px; bottom: 4px; width: 9px; height: 9px; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); border-bottom-right-radius: 4px; opacity: .55; }
 
+  /* invisible grab strips on every edge and corner — the cursor is the affordance */
+  .rzh { position: absolute; z-index: 4; }
+  .rzh.n { top: -3px; left: 12px; right: 12px; height: 7px; cursor: ns-resize; }
+  .rzh.s { bottom: -3px; left: 12px; right: 12px; height: 7px; cursor: ns-resize; }
+  .rzh.w { left: -3px; top: 12px; bottom: 12px; width: 7px; cursor: ew-resize; }
+  .rzh.e { right: -3px; top: 12px; bottom: 12px; width: 7px; cursor: ew-resize; }
+  .rzh.nw { top: -3px; left: -3px; width: 15px; height: 15px; cursor: nwse-resize; }
+  .rzh.ne { top: -3px; right: -3px; width: 15px; height: 15px; cursor: nesw-resize; }
+  .rzh.sw { bottom: -3px; left: -3px; width: 15px; height: 15px; cursor: nesw-resize; }
+  .note.expanded .rzh, .note.expanded .rz { display: none; }
+
   /* ---------- dictation ---------- */
   .tool.mic.rec { color: #fff; background: #E5484D; opacity: 1; animation: micpulse 1.7s infinite; }
   .tool.mic.rec:hover { background: #d83f44; }
@@ -1480,7 +1491,12 @@
       e.preventDefault(); el.classList.remove('dragover');
       if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addFiles(el, n, e.dataTransfer.files);
     });
-    var rz = document.createElement('div'); rz.className = 'rz'; rz.title = 'Drag to resize'; enableResize(rz, el, n); el.appendChild(rz);
+    var rz = document.createElement('div'); rz.className = 'rz'; rz.title = 'Drag to resize'; enableResize(rz, el, n, 'se'); el.appendChild(rz);
+    // every other edge and corner resizes too (the .rz grip stays the visible southeast one)
+    ['n', 's', 'e', 'w', 'nw', 'ne', 'sw'].forEach(function (dir) {
+      var h = document.createElement('div'); h.className = 'rzh ' + dir;
+      enableResize(h, el, n, dir); el.appendChild(h);
+    });
     el.appendChild(minBtn);
 
     enableDrag(el, grip, n); enableDrag(el, nhead, n);
@@ -1502,7 +1518,7 @@
     el.addEventListener('dblclick', function (e) {
       // double-click anywhere on the note opens the big editor — skip interactive controls
       if (e.target.closest('.tools') || e.target.closest('.tools-left') || e.target.closest('.minbtn') ||
-          e.target.closest('.mp') || e.target.closest('.tp') || e.target.closest('.rz') ||
+          e.target.closest('.mp') || e.target.closest('.tp') || e.target.closest('.rz') || e.target.closest('.rzh') ||
           e.target.closest('.ck') || e.target.closest('.cbox') || e.target.closest('.files') ||
           e.target.closest('.dictbar') || e.target.closest('a') ||
           e.target.closest('button') || e.target.closest('input')) return;
@@ -1588,18 +1604,36 @@
   }
 
   /* ---------- resize ---------- */
-  function enableResize(handle, el, n) {
-    var sx, sy, sw, sh, sizing = false;
+  var RZ_MINW = 200, RZ_MAXW = 640, RZ_MINH = 170, RZ_MAXH = 700;
+  // dir is any combination of n/s/e/w — dragging a north or west edge moves the note as it sizes,
+  // so the opposite edge stays pinned where the user left it
+  function enableResize(handle, el, n, dir) {
+    dir = dir || 'se';
+    var sx, sy, sw, sh, sl, st, sizing = false;
+    function clampN(v, lo, hi) { return Math.round(Math.max(lo, Math.min(hi, v))); }
     handle.addEventListener('pointerdown', function (e) {
-      if (e.button !== 0 || n.type === 'cal') return;
+      if (e.button !== 0 || n.type === 'cal' || el.classList.contains('expanded')) return;
       sizing = true; sx = e.clientX; sy = e.clientY; sw = el.offsetWidth; sh = el.offsetHeight;
+      sl = (n.x == null ? el.offsetLeft : n.x); st = (n.y == null ? el.offsetTop : n.y);
+      n.z = ++zTop; el.style.zIndex = n.z; // grabbing an edge raises the note, same as touching its body
       el.classList.add('sizing'); handle.setPointerCapture(e.pointerId); e.preventDefault(); e.stopPropagation();
     });
     handle.addEventListener('pointermove', function (e) {
       if (!sizing) return;
-      n.w = Math.round(Math.max(200, Math.min(640, sw + (e.clientX - sx))));
-      n.h = Math.round(Math.max(170, Math.min(700, sh + (e.clientY - sy))));
-      el.style.width = n.w + 'px'; el.style.height = n.h + 'px';
+      var dx = e.clientX - sx, dy = e.clientY - sy;
+      if (dir.indexOf('e') >= 0) { n.w = clampN(sw + dx, RZ_MINW, RZ_MAXW); el.style.width = n.w + 'px'; }
+      if (dir.indexOf('w') >= 0) {
+        n.w = clampN(sw - dx, RZ_MINW, RZ_MAXW);
+        n.x = sl + sw - n.w;
+        el.style.width = n.w + 'px'; el.style.left = n.x + 'px';
+      }
+      if (dir.indexOf('s') >= 0) { n.h = clampN(sh + dy, RZ_MINH, RZ_MAXH); el.style.height = n.h + 'px'; }
+      if (dir.indexOf('n') >= 0) {
+        n.h = clampN(sh - dy, RZ_MINH, RZ_MAXH);
+        n.y = st + sh - n.h;
+        if (n.y < __top()) { n.y = __top(); n.h = st + sh - n.y; } // can't tuck under the menu bar
+        el.style.height = n.h + 'px'; el.style.top = n.y + 'px';
+      }
     });
     function end() {
       if (!sizing) return; sizing = false; el.classList.remove('sizing');
@@ -2382,6 +2416,12 @@
   window.__expandNoteById = function (id) {
     var n = noteById(id); var el = desk.querySelector('.note[data-id="' + id + '"]');
     if (n && el && !expandedNote) openExpand(el, n);
+  };
+  // the desktop overlay is click-through away from the notes, so a click on the wallpaper or another
+  // app never reaches the page — the native side calls this to close any dropdown left hanging open
+  window.__closePops = function () {
+    closeMenu(); closeType();
+    if (expandedNote) { var xb = expandedNote.querySelector('.exbar'); if (xb && xb._closePops) xb._closePops(); }
   };
 
   // reminders fire real notifications when due (checked every 30s)
