@@ -489,12 +489,24 @@
   html.winmode #overlay { padding: 0; align-items: stretch; justify-content: stretch; }
   html.winmode .note.expanded { width: 100% !important; height: 100% !important; max-width: none;
     border-radius: 0; border: none; box-shadow: none; animation: none; }
-  /* header row: traffic lights (left) then our controls, toolbar band below */
-  html.winmode .note.expanded { padding-top: 8px; }
+  /* header row: our controls, toolbar band below */
+  html.winmode .note.expanded { padding-top: 0; }
   html.winmode .note.expanded .grip { display: none; }
   html.winmode .note.expanded .mp { top: 42px; right: 14px; }
   html.winmode .note.expanded .tp { top: 42px; left: 86px; }
   html.winmode .note.expanded.exmoved { position: relative !important; }
+  /* full-page: the reading column stretches to the window instead of a narrow 780px strip */
+  html.winmode .note.expanded .titlerow,
+  html.winmode .note.expanded .body,
+  html.winmode .note.expanded .ntbody,
+  html.winmode .note.expanded .files,
+  html.winmode .note.expanded .dictbar,
+  html.winmode .note.expanded .foot {
+    max-width: none !important; padding-left: 72px !important; padding-right: 72px !important;
+  }
+  html.winmode .note.expanded .titlerow { padding-top: 26px !important; }
+  /* the toolbar band spans the full width and stops hugging the very top edge */
+  html.winmode .note.expanded .exbar { padding-left: 24px; padding-right: 24px; }
 
   /* ---------- History panel ---------- */
   #histover {
@@ -607,11 +619,12 @@
     courier: '"Courier New", Courier, monospace'
   };
   var FONT_LIST = [
-    { id: 'system', name: 'System' }, { id: 'aptos', name: 'Aptos-style' }, { id: 'serif', name: 'Serif' },
+    { id: 'aptos', name: 'Aptos-style' }, { id: 'system', name: 'System' }, { id: 'serif', name: 'Serif' },
     { id: 'rounded', name: 'Rounded' }, { id: 'mono', name: 'Mono' }, { id: 'marker', name: 'Handwritten' },
     { id: 'georgia', name: 'Georgia' }, { id: 'palatino', name: 'Palatino' }, { id: 'times', name: 'Times' },
     { id: 'verdana', name: 'Verdana' }, { id: 'trebuchet', name: 'Trebuchet' }, { id: 'courier', name: 'Courier' }
   ];
+  var DEFAULT_FONT = 'aptos'; // default note style — the Aptos font
 
   // proper nouns to auto-capitalize (ambiguous words like may/march/august/will/mark are deliberately excluded)
   var PROPER = {};
@@ -776,6 +789,42 @@
     var node = document.createTextNode(t); r.insertNode(node); r.setStartAfter(node); r.collapse(true);
     sel.removeAllRanges(); sel.addRange(r);
   }
+  // insert an HTML fragment at the caret (used when pasted text is markdown)
+  function insertHTML(html) {
+    var sel = window.getSelection(); if (!sel.rangeCount) return;
+    var r = sel.getRangeAt(0); r.deleteContents();
+    var tmp = document.createElement('div'); tmp.innerHTML = html;
+    var frag = document.createDocumentFragment(), last = null, node;
+    while ((node = tmp.firstChild)) last = frag.appendChild(node);
+    r.insertNode(frag);
+    if (last) { r.setStartAfter(last); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
+  }
+  // does pasted text carry markdown worth rendering instead of showing raw ** * ` # - markers?
+  function looksMarkdown(t) {
+    return /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|^\s{0,3}#{1,6}\s|^\s*[-*+]\s+|\[[^\]]+\]\(https?:\/\/)/m.test(t);
+  }
+  function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  // inline markdown -> HTML: escape first, then bold/italic/code/links
+  function mdInline(s) {
+    s = escHtml(s);
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>');
+    return s;
+  }
+  // full markdown block -> HTML (body is white-space:pre-wrap, so newlines stay as \n)
+  function mdToHtml(t) {
+    return t.replace(/\r\n/g, '\n').split('\n').map(function (line) {
+      var h = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line);
+      if (h) return '<strong>' + mdInline(h[2]) + '</strong>';
+      var b = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+      if (b) return b[1] + '• ' + mdInline(b[2]);
+      return mdInline(line);
+    }).join('\n');
+  }
   function lineBeforeCaret(body) {
     var sel = window.getSelection(); if (!sel.rangeCount) return '';
     var r = sel.getRangeAt(0).cloneRange(); r.setStart(body, 0);
@@ -921,13 +970,13 @@
     var isNoteType = (n.type || 'note') === 'note';
     if (isNoteType) {
       var hF = document.createElement('h4'); hF.textContent = 'Font'; mp.appendChild(hF);
-      var curFont = FONT_LIST.filter(function (f) { return f.id === (n.font || 'system'); })[0] || FONT_LIST[0];
+      var curFont = FONT_LIST.filter(function (f) { return f.id === (n.font || DEFAULT_FONT); })[0] || FONT_LIST[0];
       var fToggle = document.createElement('button'); fToggle.className = 'mp-act full fonttoggle';
       fToggle.innerHTML = '<span class="ftname">' + curFont.name + '</span><span class="fchev">▾</span>';
       var fonts = document.createElement('div'); fonts.className = 'mp-fonts'; fonts.style.display = 'none';
       fToggle.addEventListener('click', function () { var open = fonts.style.display !== 'none'; fonts.style.display = open ? 'none' : 'flex'; fToggle.classList.toggle('open', !open); });
       FONT_LIST.forEach(function (fo) {
-        var b = document.createElement('button'); b.className = 'mp-font'; if ((n.font || 'system') === fo.id) b.className += ' sel';
+        var b = document.createElement('button'); b.className = 'mp-font'; if ((n.font || DEFAULT_FONT) === fo.id) b.className += ' sel';
         b.style.fontFamily = FONTS[fo.id];
         var hint = (fo.id === 'aptos') ? '<span class="fhint">' + (APTOS_OK ? 'genuine' : 'closest match') + '</span>' : '';
         b.innerHTML = '<span>' + fo.name + hint + '</span><span class="tick">✓</span>';
@@ -1186,7 +1235,7 @@
         pop.appendChild(o);
       });
     });
-    fontChip.chip.querySelector('.exfname').textContent = (FONT_LIST.filter(function (f) { return f.id === (n.font || 'system'); })[0] || FONT_LIST[0]).name;
+    fontChip.chip.querySelector('.exfname').textContent = (FONT_LIST.filter(function (f) { return f.id === (n.font || DEFAULT_FONT); })[0] || FONT_LIST[0]).name;
     sep();
     // font size − n +
     var szIdx = 2;
@@ -1247,7 +1296,31 @@
       if (!savedRange || savedRange.collapsed) { flashFoot(el, 'Select some text first'); return; }
       enterLinkMode();
     });
-    btn('<span class="s">T</span>', 'Clear formatting', function () { run('removeFormat'); });
+    // Clear formatting — with a selection, strips that text; with no selection, resets the whole note to the default style
+    function clearFmt() {
+      body.focus();
+      var sel = window.getSelection();
+      var whole = !sel || !sel.rangeCount || sel.isCollapsed;
+      if (whole) { var r = document.createRange(); r.selectNodeContents(body); sel.removeAllRanges(); sel.addRange(r); }
+      try {
+        document.execCommand('styleWithCSS', false, true);
+        document.execCommand('removeFormat', false, null);
+        document.execCommand('unlink', false, null);
+        if (whole) {
+          if (document.queryCommandState('insertOrderedList')) document.execCommand('insertOrderedList', false, null);
+          if (document.queryCommandState('insertUnorderedList')) document.execCommand('insertUnorderedList', false, null);
+          document.execCommand('justifyLeft', false, null);
+        }
+      } catch (e) {}
+      if (whole) { // return the note to the default font + spacing
+        n.font = DEFAULT_FONT; body.style.fontFamily = FONTS[DEFAULT_FONT];
+        n.lineH = null; body.style.lineHeight = '';
+        fontChip.chip.querySelector('.exfname').textContent = (FONT_LIST.filter(function (f) { return f.id === DEFAULT_FONT; })[0] || FONT_LIST[0]).name;
+        sel.removeAllRanges();
+      }
+      commit();
+    }
+    btn('<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M7 12.5H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.3 3.2 4 8.5a1.3 1.3 0 0 0 0 1.9l1.6 1.6a1.3 1.3 0 0 0 1.9 0l5.3-5.3a1.3 1.3 0 0 0 0-1.9l-1.6-1.6a1.3 1.3 0 0 0-1.9 0Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M6.4 6.1l3.5 3.5" stroke="currentColor" stroke-width="1.1"/></svg>', 'Clear formatting', clearFmt);
     return bar;
   }
   function updateExbar(bar) {
@@ -1311,7 +1384,7 @@
     function syncTitleEmpty() { titlerow.classList.toggle('tempty', title.textContent.trim() === ''); }
     syncTitleEmpty();
     var body = document.createElement('div'); body.className = 'body'; body.contentEditable = 'true'; body.spellcheck = false;
-    body.style.fontFamily = FONTS[n.font || 'system'];
+    body.style.fontFamily = FONTS[n.font || DEFAULT_FONT];
     if (n.lineH) body.style.lineHeight = n.lineH;
     if (n.html != null) body.innerHTML = n.html; else body.textContent = n.text || '';
     // older saved notes have links marked contenteditable=false, which suppresses the selection highlight
@@ -1377,7 +1450,8 @@
       if (cd && cd.files && cd.files.length) { e.preventDefault(); addFiles(el, n, cd.files); return; }
       e.preventDefault();
       var t = (cd.getData('text') || '');
-      insertText(t); touch(n);
+      if (looksMarkdown(t)) insertHTML(mdToHtml(t)); else insertText(t);
+      touch(n);
       URL_RE.lastIndex = 0;
       if (URL_RE.test(t)) {
         linkifyBody(body);
@@ -1426,9 +1500,12 @@
     el.addEventListener('pointerleave', function () { el.classList.remove('hov'); });
     el.addEventListener('pointerdown', function () { if (!el.classList.contains('expanded')) { n.z = ++zTop; el.style.zIndex = n.z; save(); } });
     el.addEventListener('dblclick', function (e) {
-      // only the top header zone (grip strip / revealed header) toggles the big view
-      if (e.target.closest('.tools') || e.target.closest('.minbtn')) return;
-      if (!e.target.closest('.grip') && !e.target.closest('.nhead')) return;
+      // double-click anywhere on the note opens the big editor — skip interactive controls
+      if (e.target.closest('.tools') || e.target.closest('.tools-left') || e.target.closest('.minbtn') ||
+          e.target.closest('.mp') || e.target.closest('.tp') || e.target.closest('.rz') ||
+          e.target.closest('.ck') || e.target.closest('.cbox') || e.target.closest('.files') ||
+          e.target.closest('.dictbar') || e.target.closest('a') ||
+          e.target.closest('button') || e.target.closest('input')) return;
       if (expandedNote === el) closeExpand(); else if (!expandedNote) openExpand(el, n);
     });
     setTimeout(function () { el.classList.remove('spawn'); }, 430);
@@ -1536,7 +1613,7 @@
   /* ---------- create / remove ---------- */
   function addNote(x, y) {
     var n = { id: 'n' + Date.now() + Math.floor(Math.random() * 999), x: x, y: y,
-      fill: { kind: 'preset', id: 'paper' }, font: 'system', title: '', text: '', updated: Date.now(), z: ++zTop };
+      fill: { kind: 'preset', id: 'paper' }, font: DEFAULT_FONT, title: '', text: '', updated: Date.now(), z: ++zTop };
     notes.push(n); var el = buildEl(n); desk.appendChild(el); updateCount(); save();
     setTimeout(function () { el.querySelector('.title').focus(); }, 60);
   }
@@ -1725,6 +1802,29 @@
     if (expandHome.next && expandHome.next.parentNode === expandHome.parent) expandHome.parent.insertBefore(el, expandHome.next);
     else expandHome.parent.appendChild(el);
     overlay.classList.remove('open'); expandedNote = null; expandHome = null;
+    var nn = notes.filter(function (x) { return x.id === el.dataset.id; })[0];
+    // in winmode the page still lives inside the small editor window, so measuring the desk
+    // here would use that window's bounds and shove the note somewhere it never was.
+    if (document.documentElement.classList.contains('winmode')) pendingFit = el.dataset.id;
+    else fitCollapsed(el, nn); // big notes fit the page on minimize
+  }
+  var pendingFit = null;
+  // minimizing back to the desktop: a really big note is capped to the screen (and a tall one widened) so it fits and stays on-page
+  function fitCollapsed(el, n) {
+    if (!n) return;
+    var G = 12;
+    var maxW = Math.max(240, window.innerWidth - G * 2);
+    var maxH = Math.max(160, window.innerHeight - __top() - G);
+    var w = el.offsetWidth, h = el.offsetHeight, changed = false;
+    if (w > maxW) { n.w = maxW; el.style.width = maxW + 'px'; w = maxW; changed = true; }
+    if (h > maxH) {
+      n.h = maxH; el.style.height = maxH + 'px';
+      var wantW = Math.min(maxW, Math.max(w, 540)); // shorter+wider reads better than tall+clipped
+      if (wantW > w) { n.w = wantW; el.style.width = wantW + 'px'; w = wantW; }
+      changed = true;
+    }
+    if (changed) { touch(n); save(); }
+    clampToScreen(n, el);
   }
 
   /* ---------- checklist ---------- */
@@ -2150,9 +2250,9 @@
   function spawnTutorialNotes() {
     var w = window.innerWidth, h = window.innerHeight, now = Date.now();
     var seeds = [
-      { fill: { kind: 'preset', id: 'yellow' }, font: 'system', title: 'Welcome to Desk Notes 👋',
+      { fill: { kind: 'preset', id: 'yellow' }, font: DEFAULT_FONT, title: 'Welcome to Desk Notes 👋',
         text: '• Double-tap me to open the big editor\n• Hover me — a header appears up top\n• Tap the ○ circle for colors, fonts + options\n• Tap the ☰ lines to switch Note · Task · Calendar\n• Tap the 🎙 mic and speak — words appear at your cursor\n• Drag my header to move me — I snap to edges', dx: -330, dy: -110, w: 306, upd: now - 60000 },
-      { type: 'task', fill: { kind: 'preset', id: 'paper' }, font: 'system', title: 'Try a task list ✓',
+      { type: 'task', fill: { kind: 'preset', id: 'paper' }, font: DEFAULT_FONT, title: 'Try a task list ✓',
         tasks: [
           { text: 'Check me off', done: false },
           { text: 'Press Enter to add another task', done: false },
@@ -2320,6 +2420,15 @@
 
   // native shell hook: click landed outside the editor -> minimize it
   window.__closeExpand = function () { closeExpand(); };
+
+  // native shell hook: the page is back on the desktop overlay, so the deferred fit can measure for real
+  window.__fitAfterRestore = function () {
+    var id = pendingFit; pendingFit = null; if (!id) return;
+    requestAnimationFrame(function () {
+      var el = desk.querySelector('.note[data-id="' + id + '"]'), n = noteById(id);
+      if (el && n) fitCollapsed(el, n);
+    });
+  };
 
   // native shell hook: menu-bar "New Note"
   window.__addNote = function () {

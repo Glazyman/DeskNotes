@@ -368,28 +368,31 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
 - (void)openEditorWindowFor:(ScreenOverlay *)ov {
     self.editorOverlay = ov;
+    // open at a standard, centered size on the note's display — the user can then drag/resize freely
+    NSScreen *host = ov.window.screen ?: [NSScreen mainScreen];
+    NSRect vis = host.visibleFrame;
+    CGFloat w = MIN(980, vis.size.width * 0.78), h = MIN(880, vis.size.height * 0.88);
+    NSRect scr = NSMakeRect(vis.origin.x + (vis.size.width - w) / 2,
+                            vis.origin.y + (vis.size.height - h) / 2, w, h);
     if (!self.editorWindow) {
-        NSRect scr = [NSScreen mainScreen].visibleFrame;
-        CGFloat w = MIN(920, scr.size.width * 0.72), h = MIN(820, scr.size.height * 0.86);
+        // a real (thin, empty) titlebar gives a clean top and a proper drag strip above the toolbar
         self.editorWindow = [[NSWindow alloc]
-            initWithContentRect:NSMakeRect(scr.origin.x + (scr.size.width - w) / 2,
-                                           scr.origin.y + (scr.size.height - h) / 2, w, h)
+            initWithContentRect:scr
                       styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
-                                 NSWindowStyleMaskFullSizeContentView)
+                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
                         backing:NSBackingStoreBuffered defer:NO];
         self.editorWindow.title = @"Desk Notes";
-        self.editorWindow.titlebarAppearsTransparent = YES;  // note surface runs to the very top
-        self.editorWindow.titleVisibility = NSWindowTitleHidden;
-        // clean header: no traffic lights (the note's own minimize arrows + Esc close it)
-        [self.editorWindow standardWindowButton:NSWindowCloseButton].hidden = YES;
+        self.editorWindow.titleVisibility = NSWindowTitleHidden;   // no title text — just a clean drag strip
+        self.editorWindow.movableByWindowBackground = YES;
+        // keep the red close button so there's an obvious way out; hide the rest for a clean look
         [self.editorWindow standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
         [self.editorWindow standardWindowButton:NSWindowZoomButton].hidden = YES;
         self.editorWindow.releasedWhenClosed = NO;
         self.editorWindow.minSize = NSMakeSize(560, 420);
         self.editorWindow.delegate = self;
-        [self.editorWindow setFrameAutosaveName:@"DeskNotesEditor"];
     }
+    // always open at the standard centered size (the user drags/resizes from there)
+    [self.editorWindow setFrame:scr display:YES];
     [ov.webView evaluateJavaScript:@"document.documentElement.classList.add('winmode');" completionHandler:nil];
     self.editorWindow.contentView = ov.webView;        // move the page into the app window
     [ov.window orderOut:nil];                          // that display's desktop layer rests while editing
@@ -412,6 +415,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         if (!self.hiddenAll) [o.window orderFrontRegardless];
     }
     self.editorOverlay = nil;
+    // now that the page measures the desktop again, let it fit any oversized note
+    [ov.webView evaluateJavaScript:@"window.__fitAfterRestore&&window.__fitAfterRestore();" completionHandler:nil];
 }
 
 // red close button on the editor window = minimize back to the desktop note
