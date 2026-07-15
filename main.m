@@ -62,6 +62,12 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 @property (strong) NSWindow *editorWindow; // real app window for the expanded editor (Stage Manager stages it)
 @property (strong) NSWindow *panelWindow;  // separate Settings/History window (desktop notes stay visible)
 @property (strong) WKWebView *panelWebView;
+// a note being dragged toward another display: the source keeps the mouse for the whole drag, so the
+// note is handed to the display under the cursor on drop, with a live ghost previewing it on the way
+@property (weak) ScreenOverlay *dragOverlay;   // overlay whose note is in hand (nil = no drag)
+@property (weak) ScreenOverlay *ghostOverlay;  // overlay currently showing the preview
+@property (copy) NSString *dragJSON;           // the note itself, captured once at drag start
+@property (assign) NSPoint dragGrab;           // where inside the note the cursor took hold
 // local Whisper dictation
 @property (strong) AVAudioEngine *engine;
 @property (strong) AVAudioConverter *conv;
@@ -282,6 +288,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     [config.userContentController addScriptMessageHandler:self name:@"dict"];
     [config.userContentController addScriptMessageHandler:self name:@"notify"];
     [config.userContentController addScriptMessageHandler:self name:@"backup"];
+    [config.userContentController addScriptMessageHandler:self name:@"drag"];
     // which note store this display reads/writes — must exist before the page script runs
     [config.userContentController addUserScript:
         [[WKUserScript alloc] initWithSource:[NSString stringWithFormat:@"window.__screenKey=%@;", JSStr(suffix)]
@@ -338,6 +345,9 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 
 - (void)updateMousePassthrough {
     if (self.hiddenAll || self.editorOverlay) return; // editor lives in a normal window; no passthrough games
+    // Mid-drag the cursor may leave the source window entirely (that's how a note reaches the next
+    // display). Turning that window click-through now would cut the drag off from its own mouse-up.
+    if (self.dragOverlay) return;
     NSPoint p = [NSEvent mouseLocation];
     for (ScreenOverlay *ov in self.overlays) {
         NSRect f = ov.window.frame;
@@ -403,6 +413,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         }
         return;
     }
+    if ([message.name isEqualToString:@"drag"]) { [self handleDragMessage:message]; return; }
     if (![message.name isEqualToString:@"hit"]) return;
     NSDictionary *body = message.body;
     if (![body isKindOfClass:[NSDictionary class]]) return;
@@ -423,6 +434,73 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     // editor opens as a REAL app window so macOS (incl. Stage Manager) treats it like launching an app
     if (expanded && !self.editorOverlay) [self openEditorWindowFor:ov];
     else if (!expanded && self.editorOverlay == ov) [self closeEditorWindow];
+}
+
+// Where the note's top-left sits on `ov` if the cursor let go right now, keeping the grab offset so the
+// note stays under the same spot of the pointer it was picked up by.
+- (NSPoint)dragPointOnOverlay:(ScreenOverlay *)ov {
+    NSPoint m = [NSEvent mouseLocation];
+    NSRect f = ov.window.frame;
+    return NSMakePoint(m.x - f.origin.x - self.dragGrab.x,
+                       f.size.height - (m.y - f.origin.y) - self.dragGrab.y); // flip to web coords
+}
+
+- (void)showGhostOn:(ScreenOverlay *)ov {
+    if (!self.dragJSON) return;
+    NSPoint p = [self dragPointOnOverlay:ov];
+    if (self.ghostOverlay == ov) { // already there: just move it, no need to re-send the note
+        [ov.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__ghostMove&&window.__ghostMove(%.0f,%.0f);", p.x, p.y]
+                     completionHandler:nil];
+        return;
+    }
+    [self hideGhost];
+    self.ghostOverlay = ov;
+    [ov.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__ghostShow&&window.__ghostShow(%@,%.0f,%.0f);",
+                                    JSStr(self.dragJSON), p.x, p.y] completionHandler:nil];
+}
+
+- (void)hideGhost {
+    if (!self.ghostOverlay) return;
+    [self.ghostOverlay.webView evaluateJavaScript:@"window.__ghostHide&&window.__ghostHide();" completionHandler:nil];
+    self.ghostOverlay = nil;
+}
+
+- (void)handleDragMessage:(WKScriptMessage *)message {
+    NSDictionary *b = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
+    if (!b) return;
+    ScreenOverlay *src = [self overlayForWebView:message.webView];
+    if (!src) return;
+    NSString *phase = b[@"phase"];
+
+    if ([phase isEqualToString:@"begin"]) {
+        self.dragOverlay = src;
+        self.dragJSON = [b[@"note"] isKindOfClass:[NSString class]] ? b[@"note"] : nil;
+        self.dragGrab = NSMakePoint([b[@"gx"] doubleValue], [b[@"gy"] doubleValue]);
+        return;
+    }
+    if (self.dragOverlay != src) return; // a stale drag from a display that has since gone away
+
+    ScreenOverlay *tgt = [self overlayUnderMouse];
+    BOOL crossing = (tgt && tgt != src);
+
+    if ([phase isEqualToString:@"move"]) {
+        if (crossing) [self showGhostOn:tgt]; else [self hideGhost];
+        return;
+    }
+    if ([phase isEqualToString:@"drop"]) {
+        [self hideGhost];
+        if (crossing && self.dragJSON) {
+            NSPoint p = [self dragPointOnOverlay:tgt];
+            NSString *nid = [b[@"id"] isKindOfClass:[NSString class]] ? b[@"id"] : @"";
+            [tgt.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__adopt&&window.__adopt(%@,%.0f,%.0f);",
+                                             JSStr(self.dragJSON), p.x, p.y] completionHandler:nil];
+            [src.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__yield&&window.__yield(%@);", JSStr(nid)]
+                          completionHandler:nil];
+        }
+        self.dragOverlay = nil; self.dragJSON = nil;
+        [self updateMousePassthrough]; // passthrough was frozen for the drag; catch up now
+        return;
+    }
 }
 
 - (void)openEditorWindowFor:(ScreenOverlay *)ov {
@@ -500,7 +578,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     @"document.documentElement.classList.add('native');"
     @"if(!window.__hitTimer){window.__hitTimer=setInterval(function(){"
     @"  var rs=[];"
-    @"  document.querySelectorAll('.note').forEach(function(n){var r=n.getBoundingClientRect();rs.push([r.left,r.top,r.width,r.height]);});"
+    @"  document.querySelectorAll('.note:not(.ghostnote)').forEach(function(n){var r=n.getBoundingClientRect();rs.push([r.left,r.top,r.width,r.height]);});"
     @"  document.querySelectorAll('.note.menu-open .mp, .note.type-open .tp').forEach(function(n){var r=n.getBoundingClientRect();rs.push([r.left,r.top,r.width,r.height]);});"
     @"  var sb=document.getElementById('selbar');"
     @"  if(sb&&sb.style.display==='flex'){var r=sb.getBoundingClientRect();rs.push([r.left,r.top,r.width,r.height]);}"

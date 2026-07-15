@@ -215,6 +215,8 @@
 
   .note .grip { position: absolute; top: 0; left: 0; right: 0; height: 30px; cursor: grab; }
   .note.lift .grip { cursor: grabbing; }
+  /* preview of a note being dragged in from another display — inert until it is really dropped here */
+  .note.ghostnote { pointer-events: none; opacity: .82; transform: scale(1.026); box-shadow: var(--sh-lift); }
 
   /* one collapsing header row: hidden (zero space) until top-zone hover / menu open */
   .note .nhead {
@@ -1585,21 +1587,40 @@
       });
     });
   }
+  function postDrag(msg) { try { window.webkit.messageHandlers.drag.postMessage(msg); } catch (e) {} }
+  function offScreen(e) { // cursor has left this display — it is reaching for the next one
+    return e.clientX < 0 || e.clientX > window.innerWidth || e.clientY < 0 || e.clientY > window.innerHeight;
+  }
   function enableDrag(el, handle, n) {
-    var sx, sy, ox, oy, dragging = false;
+    var sx, sy, ox, oy, dragging = false, wasOff = false;
     handle.addEventListener('pointerdown', function (e) {
       if (e.button !== 0 || el.classList.contains('expanded')) return;
-      dragging = true; sx = e.clientX; sy = e.clientY; ox = n.x; oy = n.y;
+      dragging = true; sx = e.clientX; sy = e.clientY; ox = n.x; oy = n.y; wasOff = false;
       el.classList.add('lift'); handle.setPointerCapture(e.pointerId); e.preventDefault();
+      // hand the note to the native side once, so a drag onto another display can preview and land it
+      postDrag({ phase: 'begin', id: n.id, note: JSON.stringify(n), gx: e.clientX - n.x, gy: e.clientY - n.y });
     });
     handle.addEventListener('pointermove', function (e) {
       if (!dragging) return;
-      var nx = Math.max(-50, Math.min(window.innerWidth - 60, ox + (e.clientX - sx)));
-      var ny = Math.max(__top(), Math.min(window.innerHeight - 60, oy + (e.clientY - sy)));
+      // deliberately unclamped: the note has to be able to run off this display's edge to reach the
+      // next one. A drop that lands nowhere is pulled back in by end().
+      var nx = ox + (e.clientX - sx), ny = oy + (e.clientY - sy);
       var sp = snapPos(n, nx, ny, el); nx = sp[0]; ny = sp[1];
       n.x = nx; n.y = ny; el.style.left = nx + 'px'; el.style.top = ny + 'px';
+      var off = offScreen(e);
+      if (off || wasOff) { postDrag({ phase: 'move', id: n.id }); wasOff = off; } // quiet unless crossing
     });
-    function end() { if (!dragging) return; dragging = false; el.classList.remove('lift'); save(); }
+    function end(e) {
+      if (!dragging) return;
+      dragging = false; el.classList.remove('lift');
+      postDrag({ phase: 'drop', id: n.id });
+      if (!e || !offScreen(e)) { clampToScreen(n, el); save(); return; }
+      // dropped past our edge: another display may be adopting it. If nobody claims it, take it back.
+      setTimeout(function () {
+        if (!noteById(n.id)) return; // handed off — it lives on the other display now
+        clampToScreen(n, el); save();
+      }, 300);
+    }
     handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
   }
 
@@ -2130,10 +2151,16 @@
     tb.appendChild(list);
     return tb;
   }
+  function sortTasks(n) { // stable partition: unchecked keep their order on top, checked fall to the bottom
+    var open = [], done = [];
+    (n.tasks || []).forEach(function (t) { (t.done ? done : open).push(t); });
+    n.tasks = open.concat(done);
+  }
   function renderNoteTasks(n, el, focusIdx) {
     var list = el.querySelector('.ntlist'); if (!list) return;
     n.tasks = n.tasks || [];
     if (!n.tasks.length) n.tasks.push({ id: 't' + Date.now(), text: '', done: false }); // always one line to type on
+    sortTasks(n);
     list.innerHTML = '';
     n.tasks.forEach(function (t, i) {
       var row = document.createElement('div'); row.className = 'ntrow' + (t.done ? ' done' : '');
@@ -2151,8 +2178,10 @@
         if (e.key === 'Enter') {
           e.preventDefault();
           t.text = tx.textContent;
-          n.tasks.splice(i + 1, 0, { id: 't' + Date.now() + Math.floor(Math.random() * 999), text: '', done: false });
-          touch(n); save(); renderNoteTasks(n, el, i + 1);
+          var nt = { id: 't' + Date.now() + Math.floor(Math.random() * 999), text: '', done: false };
+          n.tasks.splice(i + 1, 0, nt);
+          sortTasks(n); // a new line typed from a checked row still belongs above the checked ones
+          touch(n); save(); renderNoteTasks(n, el, n.tasks.indexOf(nt));
         } else if (e.key === 'Backspace' && tx.textContent === '' && n.tasks.length > 1) {
           e.preventDefault();
           n.tasks.splice(i, 1); touch(n); save(); renderNoteTasks(n, el, Math.max(0, i - 1));
@@ -2468,6 +2497,45 @@
       var el = desk.querySelector('.note[data-id="' + id + '"]'), n = noteById(id);
       if (el && n) fitCollapsed(el, n);
     });
+  };
+
+  /* ---------- notes crossing between displays ----------
+     Each display is its own window with its own note store, and the display the drag started on keeps
+     the mouse until it is released. So while a note is dragged over here, the native shell shows it as
+     a ghost that follows the cursor; on release the note is really moved into this display's store. */
+  var ghostEl = null;
+  window.__ghostShow = function (json, x, y) {
+    var n; try { n = JSON.parse(json); } catch (e) { return; }
+    window.__ghostHide();
+    n.x = x; n.y = y; normFill(n);
+    try { ghostEl = buildEl(n); } catch (e) { ghostEl = null; return; }
+    ghostEl.classList.add('ghostnote'); // inert: no pointer events, not reported as a clickable rect
+    ghostEl.style.zIndex = zTop + 1;
+    desk.appendChild(ghostEl);
+  };
+  window.__ghostMove = function (x, y) {
+    if (ghostEl) { ghostEl.style.left = x + 'px'; ghostEl.style.top = y + 'px'; }
+  };
+  window.__ghostHide = function () { if (ghostEl) { ghostEl.remove(); ghostEl = null; } };
+  // the note was released over this display: it becomes ours, landing where it was dropped
+  window.__adopt = function (json, x, y) {
+    window.__ghostHide();
+    var n; try { n = JSON.parse(json); } catch (e) { return; }
+    if (noteById(n.id)) return;
+    n.x = x; n.y = y; n.z = ++zTop; normFill(n);
+    notes.push(n);
+    var el;
+    try { el = buildEl(n); } catch (e) { notes.pop(); return; }
+    desk.appendChild(el);
+    clampToScreen(n, el); // displays differ in size: never land it half off the edge
+    updateCount(); save();
+  };
+  // the note was released over another display: drop it from this one (it moved, so it isn't archived)
+  window.__yield = function (id) {
+    var el = desk.querySelector('.note[data-id="' + id + '"]');
+    if (el) el.remove();
+    notes = notes.filter(function (x) { return x.id !== id; });
+    updateCount(); save();
   };
 
   // native shell hook: menu-bar "New Note"
