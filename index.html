@@ -226,6 +226,20 @@
   }
   .note.hov .nhead,
   .note.menu-open .nhead, .note.type-open .nhead, .note.recording .nhead { height: 28px; opacity: 1; }
+  /* big view: the header is permanent — the editor has no window close button, so its controls
+     (including the way out) must never be hidden behind a hover. The expanded note drops its padding,
+     so the row needs its own or the buttons sit flat against the window edges. */
+  .note.expanded .nhead { height: 44px; opacity: 1; padding: 0 16px; cursor: grab; }
+  .note.expanded .nhead:active { cursor: grabbing; }
+  /* buttons scale with the taller bar instead of floating as small dots in it */
+  .note.expanded .nhead .tools { gap: 4px; }
+  .note.expanded .nhead .tool { width: 32px; height: 30px; border-radius: 8px; }
+  .note.expanded .nhead .tool svg { width: 17px; height: 17px; }
+  .note.expanded .nhead .chip { width: 17px; height: 17px; }
+  /* the minimize control belongs to the big view only — a note on the desk has nothing to minimize.
+     Qualified with .tool so it outranks the `.tool { display: grid }` rule further down. */
+  .tool.mintop { display: none; }
+  .note.expanded .tool.mintop { display: grid; }
   .note .tools { display: flex; gap: 2px; }
   .tool {
     opacity: 1; border: none; background: transparent;
@@ -425,9 +439,13 @@
   .note.expanded .foot {
     margin-top: auto; padding: 13px 48px; border-top: 1px solid var(--hair);
   }
-  .note.expanded .mp { top: 46px; right: 16px; }
-  .note.expanded .tp { top: 46px; left: 16px; }
-  .note.expanded .minbtn { right: 16px; bottom: 13px; }
+  .note.expanded .mp { top: 50px; right: 16px; }
+  .note.expanded .tp { top: 50px; left: 16px; }
+  /* centred in the footer band (13px padding + text + 13px): at bottom:13 the 30px button pushed up
+     through the divider instead of sitting inside it. With no footer there is no band to sit in, so
+     it keeps a plain corner inset instead. */
+  .note.expanded .minbtn { right: 16px; bottom: 5px; }
+  .note.expanded.nofoot .minbtn { bottom: 12px; }
   .note.expanded .ncalgrid { gap: 6px; }
   .note.expanded .ncalcell { font-size: 14px; border-radius: 10px; }
   .note.expanded .ncalmonth { font-size: 17px; }
@@ -488,7 +506,7 @@
   html.native #bar { display: none; }
   html.native #hint { display: none; }
   /* native: reveal is driven by a JS-managed .hov class — stuck CSS hover can never pin controls open */
-  html.native .note:not(.hov):not(.menu-open):not(.type-open):not(.recording) .nhead { height: 0 !important; opacity: 0 !important; }
+  html.native .note:not(.expanded):not(.hov):not(.menu-open):not(.type-open):not(.recording) .nhead { height: 0 !important; opacity: 0 !important; }
   html.native .note:not(.hov):not(.expanded) .rz { opacity: 0 !important; }
   html.native .note:not(.hov):not(.editing) .titlerow.tempty { height: 0 !important; overflow: hidden; opacity: 0 !important; }
 
@@ -502,11 +520,12 @@
   html.winmode #overlay { padding: 0; align-items: stretch; justify-content: stretch; }
   html.winmode .note.expanded { width: 100% !important; height: 100% !important; max-width: none;
     border-radius: 0; border: none; box-shadow: none; animation: none; }
-  /* header row: our controls, toolbar band below */
+  /* No Mac titlebar at all (the native side hides it), so the header sits tight at the very top and
+     the window is dragged by the header itself. */
   html.winmode .note.expanded { padding-top: 0; }
   html.winmode .note.expanded .grip { display: none; }
-  html.winmode .note.expanded .mp { top: 42px; right: 14px; }
-  html.winmode .note.expanded .tp { top: 42px; left: 86px; }
+  html.winmode .note.expanded .mp { top: 76px; right: 14px; }
+  html.winmode .note.expanded .tp { top: 76px; left: 16px; }
   html.winmode .note.expanded.exmoved { position: relative !important; }
   /* full-page: the reading column stretches to the window instead of a narrow 780px strip */
   html.winmode .note.expanded .titlerow,
@@ -1368,7 +1387,12 @@
     minBtn.innerHTML = '<svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5L9.3 6.7M9.4 3.6l-.1 3.1 3.1-.1"/><path d="M2.5 13.5l4.2-4.2M6.6 12.4l.1-3.1-3.1.1"/></g></svg>';
     minBtn.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
     minBtn.addEventListener('click', function (e) { e.stopPropagation(); closeExpand(); });
-    tools.appendChild(micBtn); tools.appendChild(menuBtn); tools.appendChild(del);
+    // the big view has no window close button, so the same way out sits in the header too
+    var minTop = document.createElement('button'); minTop.className = 'tool mintop'; minTop.title = 'Minimize';
+    minTop.innerHTML = minBtn.innerHTML;
+    minTop.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+    minTop.addEventListener('click', function (e) { e.stopPropagation(); closeExpand(); });
+    tools.appendChild(micBtn); tools.appendChild(menuBtn); tools.appendChild(del); tools.appendChild(minTop);
     if ((n.type || 'note') !== 'note') micBtn.style.display = 'none';
     if (n.type === 'cal') menuBtn.style.display = 'none'; // calendar keeps it minimal — no color/font menu
 
@@ -1502,14 +1526,28 @@
     el.appendChild(minBtn);
 
     enableDrag(el, grip, n); enableDrag(el, nhead, n);
+    // In the editor the note fills a real macOS window, so dragging its header has to move the WINDOW.
+    // WebKit has no -webkit-app-region, so the native side is asked to take the drag over from here.
+    nhead.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || !el.classList.contains('expanded')) return;
+      if (!document.documentElement.classList.contains('winmode')) return;
+      if (e.target.closest('button') || e.target.closest('.tools') || e.target.closest('.tools-left')) return;
+      // send where in the window it was grabbed: reading the mouse when the message lands instead
+      // would bake in however far the cursor travelled on the way over, and the window would jump
+      try { window.webkit.messageHandlers.drag.postMessage({ phase: 'winmove', gx: e.clientX, gy: e.clientY }); } catch (err) {}
+    });
+    // The note's header strip: the top 30px the note is dragged by, plus the header row once it has
+    // opened. This is measured, not hit-tested: the note's fill pseudo-element paints over .grip and
+    // reports the note as the event target, so `closest('.grip')` never matches and cannot be used.
+    function headBottom() {
+      var r = el.getBoundingClientRect(), nb = nhead.getBoundingClientRect();
+      return Math.max(r.top + 30, nb.height > 0 ? nb.bottom : 0);
+    }
     // mini note: header reveals only when hovering the top zone (title and above); big view: anywhere
     el.addEventListener('pointermove', function (e) {
       var r = el.getBoundingClientRect();
       var on = el.classList.contains('hov');
-      if (el.classList.contains('expanded')) { // big view: header reveals near the top only
-        el.classList.toggle('hov', e.clientY <= r.top + 52 + (on ? 36 : 0));
-        return;
-      }
+      if (el.classList.contains('expanded')) return; // big view: header is always up, nothing to reveal
       var tb = titlerow.getBoundingClientRect();
       // hysteresis: once open, the zone grows by the header's height so it can't flicker on/off
       var limit = Math.max(r.top + 46, tb.height > 0 ? tb.bottom : 0) + (on ? 36 : 0);
@@ -1518,7 +1556,9 @@
     el.addEventListener('pointerleave', function () { el.classList.remove('hov'); });
     el.addEventListener('pointerdown', function () { if (!el.classList.contains('expanded')) { n.z = ++zTop; el.style.zIndex = n.z; save(); } });
     el.addEventListener('dblclick', function (e) {
-      // double-click anywhere on the note opens the big editor — skip interactive controls
+      // Only the header strip opens or closes the big editor. A double-click on the title or the
+      // text is text selection and must be left alone.
+      if (e.clientY > headBottom()) return;
       if (e.target.closest('.tools') || e.target.closest('.tools-left') || e.target.closest('.minbtn') ||
           e.target.closest('.mp') || e.target.closest('.tp') || e.target.closest('.rz') || e.target.closest('.rzh') ||
           e.target.closest('.ck') || e.target.closest('.cbox') || e.target.closest('.files') ||
@@ -2310,7 +2350,17 @@
   window.addEventListener('resize', function () { if (selbar && selbar.style.display === 'flex') positionSelbar(); });
 
   /* ---------- boot (must run after all declarations above) ---------- */
+  // The tutorial is a first-install welcome, not a filler for an empty screen. An empty store is a
+  // perfectly normal state — a second display nobody has put a note on yet, or every note deleted —
+  // so it must not bring the tutorial back on each launch. This flag is set once, and shared by every
+  // display (they split their notes across keys, but share one localStorage).
+  var TUT_FLAG = 'notes.tutorial.v1';
+  function tutorialSeen() { try { return !!localStorage.getItem(TUT_FLAG); } catch (e) { return true; } }
+  function markTutorialSeen() { try { localStorage.setItem(TUT_FLAG, String(Date.now())); } catch (e) {} }
+  // the desktop view of the main display: the settings window and the extra displays never self-seed
+  function isMainView() { return !window.__panel && (window.__screenKey === '' || window.__screenKey === undefined); }
   function spawnTutorialNotes() {
+    markTutorialSeen();
     var w = window.innerWidth, h = window.innerHeight, now = Date.now();
     var seeds = [
       { fill: { kind: 'preset', id: 'yellow' }, font: DEFAULT_FONT, title: 'Welcome to Desk Notes 👋',
@@ -2478,8 +2528,9 @@
   var saved = load();
   if (saved && saved.length) {
     notes = saved; notes.forEach(function (n) { normFill(n); if (n.z && n.z > zTop) zTop = n.z; }); renderAll();
-  } else {
-    spawnTutorialNotes();
+    markTutorialSeen(); // notes already here: whoever this is, they are past the welcome
+  } else if (!tutorialSeen() && isMainView()) {
+    spawnTutorialNotes(); // genuinely the first run after install
   }
 
   // losing window focus ends editing so hover/editing controls never linger

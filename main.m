@@ -68,6 +68,8 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
 @property (weak) ScreenOverlay *ghostOverlay;  // overlay currently showing the preview
 @property (copy) NSString *dragJSON;           // the note itself, captured once at drag start
 @property (assign) NSPoint dragGrab;           // where inside the note the cursor took hold
+@property (assign) BOOL winDragging;           // editor window being dragged by its own header
+@property (assign) NSPoint winDragOff;         // cursor offset inside the editor window frame
 // local Whisper dictation
 @property (strong) AVAudioEngine *engine;
 @property (strong) AVAudioConverter *conv;
@@ -153,10 +155,12 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     // track the cursor: over a note -> catch clicks; elsewhere -> pass through
     NSEventMask moveMask = NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged;
     [NSEvent addGlobalMonitorForEventsMatchingMask:moveMask handler:^(NSEvent *e) {
+        [weakSelf tickWindowDrag];
         [weakSelf updateMousePassthrough];
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:(moveMask | NSEventMaskLeftMouseDown)
                                           handler:^NSEvent *(NSEvent *e) {
+        [weakSelf tickWindowDrag]; // the header drag lives over our own window, so it lands here
         [weakSelf updateMousePassthrough];
         if (e.type == NSEventTypeLeftMouseDown) {
             ScreenOverlay *ov = [weakSelf overlayUnderMouse];
@@ -343,6 +347,15 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
                         completionHandler:nil];
 }
 
+// the editor window follows the cursor while its header is held; the button state ends the drag, so
+// no separate mouse-up monitor is needed
+- (void)tickWindowDrag {
+    if (!self.winDragging) return;
+    if (!(NSEvent.pressedMouseButtons & 1) || !self.editorWindow) { self.winDragging = NO; return; }
+    NSPoint m = [NSEvent mouseLocation];
+    [self.editorWindow setFrameOrigin:NSMakePoint(m.x - self.winDragOff.x, m.y - self.winDragOff.y)];
+}
+
 - (void)updateMousePassthrough {
     if (self.hiddenAll || self.editorOverlay) return; // editor lives in a normal window; no passthrough games
     // Mid-drag the cursor may leave the source window entirely (that's how a note reaches the next
@@ -472,6 +485,16 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     if (!src) return;
     NSString *phase = b[@"phase"];
 
+    // The editor's header IS its titlebar. performWindowDragWithEvent: is no use here — by the time
+    // this message crosses from the page, NSApp.currentEvent is no longer the mouse-down it needs — so
+    // the window is moved by hand from the mouse monitors instead.
+    if ([phase isEqualToString:@"winmove"]) {
+        if (!self.editorWindow) return;
+        NSRect f = self.editorWindow.frame; // page coords are window coords here (full-size content view)
+        self.winDragOff = NSMakePoint([b[@"gx"] doubleValue], f.size.height - [b[@"gy"] doubleValue]);
+        self.winDragging = YES;
+        return;
+    }
     if ([phase isEqualToString:@"begin"]) {
         self.dragOverlay = src;
         self.dragJSON = [b[@"note"] isKindOfClass:[NSString class]] ? b[@"note"] : nil;
@@ -503,6 +526,14 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     }
 }
 
+// Hiding the titlebar container does what titlebarAppearsTransparent alone cannot: the bar keeps its
+// ~28px of the window and swallows every click in it, which would leave the note's own header buttons
+// dead. Hidden views do not hit-test, so the header reaches the top edge and stays clickable.
+- (void)hideTitlebarOf:(NSWindow *)win {
+    for (NSView *v in win.contentView.superview.subviews)
+        if ([NSStringFromClass(v.class) isEqualToString:@"NSTitlebarContainerView"]) v.hidden = YES;
+}
+
 - (void)openEditorWindowFor:(ScreenOverlay *)ov {
     self.editorOverlay = ov;
     // open at a standard, centered size on the note's display — the user can then drag/resize freely
@@ -512,16 +543,20 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     NSRect scr = NSMakeRect(vis.origin.x + (vis.size.width - w) / 2,
                             vis.origin.y + (vis.size.height - h) / 2, w, h);
     if (!self.editorWindow) {
-        // a real (thin, empty) titlebar gives a clean top and a proper drag strip above the toolbar
+        // titled + full-size content: a real app window to macOS, but the bar itself is hidden below
         self.editorWindow = [[NSWindow alloc]
             initWithContentRect:scr
                       styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+                                 NSWindowStyleMaskFullSizeContentView)
                         backing:NSBackingStoreBuffered defer:NO];
         self.editorWindow.title = @"Desk Notes";
-        self.editorWindow.titleVisibility = NSWindowTitleHidden;   // no title text — just a clean drag strip
-        self.editorWindow.movableByWindowBackground = YES;
-        // keep the red close button so there's an obvious way out; hide the rest for a clean look
+        self.editorWindow.titleVisibility = NSWindowTitleHidden;   // no title text
+        // No Mac titlebar: the note runs edge to edge and its own header is the titlebar. The window
+        // stays *titled* on purpose — that is what makes macOS (and Stage Manager) treat it as an app
+        // window — the bar is just hidden, and the page reports header grabs so we can move it.
+        self.editorWindow.titlebarAppearsTransparent = YES;
+        [self.editorWindow standardWindowButton:NSWindowCloseButton].hidden = YES;
         [self.editorWindow standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
         [self.editorWindow standardWindowButton:NSWindowZoomButton].hidden = YES;
         self.editorWindow.releasedWhenClosed = NO;
@@ -530,6 +565,7 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
     }
     // always open at the standard centered size (the user drags/resizes from there)
     [self.editorWindow setFrame:scr display:YES];
+    [self hideTitlebarOf:self.editorWindow]; // re-applied per open: AppKit rebuilds the bar on style changes
     [ov.webView evaluateJavaScript:@"document.documentElement.classList.add('winmode');" completionHandler:nil];
     self.editorWindow.contentView = ov.webView;        // move the page into the app window
     [ov.window orderOut:nil];                          // that display's desktop layer rests while editing
@@ -738,6 +774,12 @@ static NSString *JSStr(NSString *s) { // safely embed a string in evaluated JS
         WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
         cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore]; // same storage as the desktop view
         [cfg.userContentController addScriptMessageHandler:self name:@"panel"];
+        // must be known before the page boots: 'panelmode' only lands after load, too late for the
+        // page to tell it is the settings window and skip seeding tutorial notes into the main store
+        [cfg.userContentController addUserScript:
+            [[WKUserScript alloc] initWithSource:@"window.__panel=true;"
+                                   injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                forMainFrameOnly:YES]];
         self.panelWebView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:cfg];
         self.panelWebView.navigationDelegate = self;
         self.panelWebView.UIDelegate = self;
